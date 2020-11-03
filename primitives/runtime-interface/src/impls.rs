@@ -1,23 +1,24 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Provides implementations for the runtime interface traits.
 
 use crate::{
-	RIType, Pointer, pass_by::{PassBy, Codec, Inner, PassByInner},
+	RIType, Pointer, pass_by::{PassBy, Codec, Inner, PassByInner, Enum},
 	util::{unpack_ptr_and_len, pack_ptr_and_len},
 };
 #[cfg(feature = "std")]
@@ -37,9 +38,6 @@ use sp_std::{any::TypeId, mem, vec::Vec};
 
 #[cfg(feature = "std")]
 use sp_std::borrow::Cow;
-
-#[cfg(not(feature = "std"))]
-use sp_std::{slice, boxed::Box};
 
 // Make sure that our assumptions for storing a pointer + its size in `u64` is valid.
 #[cfg(all(not(feature = "std"), not(feature = "disable_target_static_assertions")))]
@@ -196,11 +194,16 @@ impl<T: 'static + Decode> FromFFIValue for Vec<T> {
 		let (ptr, len) = unpack_ptr_and_len(arg);
 		let len = len as usize;
 
+		if len == 0 {
+			return Vec::new();
+		}
+
+		let data = unsafe { Vec::from_raw_parts(ptr as *mut u8, len, len) };
+
 		if TypeId::of::<T>() == TypeId::of::<u8>() {
-			unsafe { mem::transmute(Vec::from_raw_parts(ptr as *mut u8, len, len)) }
+			unsafe { mem::transmute(data) }
 		} else {
-			let slice = unsafe { slice::from_raw_parts(ptr as *const u8, len) };
-			Self::decode(&mut &slice[..]).expect("Host to wasm values are encoded correctly; qed")
+			Self::decode(&mut &data[..]).expect("Host to wasm values are encoded correctly; qed")
 		}
 	}
 }
@@ -302,10 +305,9 @@ macro_rules! impl_traits_for_arrays {
 			impl FromFFIValue for [u8; $n] {
 				fn from_ffi_value(arg: u32) -> [u8; $n] {
 					let mut res = [0u8; $n];
-					res.copy_from_slice(unsafe { slice::from_raw_parts(arg as *const u8, $n) });
+					let data = unsafe { Vec::from_raw_parts(arg as *mut u8, $n, $n) };
 
-					// Make sure we free the pointer.
-					let _ = unsafe { Box::from_raw(arg as *mut u8) };
+					res.copy_from_slice(&data);
 
 					res
 				}
@@ -360,6 +362,10 @@ impl<T: codec::Codec, E: codec::Codec> PassBy for sp_std::result::Result<T, E> {
 }
 
 impl<T: codec::Codec> PassBy for Option<T> {
+	type PassBy = Codec<Self>;
+}
+
+impl PassBy for (u32, u32, u32, u32) {
 	type PassBy = Codec<Self>;
 }
 
@@ -523,3 +529,15 @@ macro_rules! for_u128_i128 {
 
 for_u128_i128!(u128);
 for_u128_i128!(i128);
+
+impl PassBy for sp_wasm_interface::ValueType {
+	type PassBy = Enum<sp_wasm_interface::ValueType>;
+}
+
+impl PassBy for sp_wasm_interface::Value {
+	type PassBy = Codec<sp_wasm_interface::Value>;
+}
+
+impl PassBy for sp_storage::TrackedStorageKey {
+	type PassBy = Codec<Self>;
+}

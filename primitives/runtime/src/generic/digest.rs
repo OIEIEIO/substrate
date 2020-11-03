@@ -1,18 +1,19 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Generic implementation of a digest.
 
@@ -27,19 +28,23 @@ use sp_core::{ChangesTrieConfiguration, RuntimeDebug};
 
 /// Generic header digest.
 #[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug)]
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-pub struct Digest<Hash: Encode + Decode> {
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize, parity_util_mem::MallocSizeOf))]
+pub struct Digest<Hash> {
 	/// A list of logs in the digest.
+	#[cfg_attr(
+		feature = "std",
+		serde(bound(serialize = "Hash: codec::Codec", deserialize = "Hash: codec::Codec"))
+	)]
 	pub logs: Vec<DigestItem<Hash>>,
 }
 
-impl<Item: Encode + Decode> Default for Digest<Item> {
+impl<Item> Default for Digest<Item> {
 	fn default() -> Self {
 		Digest { logs: Vec::new(), }
 	}
 }
 
-impl<Hash: Encode + Decode> Digest<Hash> {
+impl<Hash> Digest<Hash> {
 	/// Get reference to all digest items.
 	pub fn logs(&self) -> &[DigestItem<Hash>] {
 		&self.logs
@@ -74,6 +79,7 @@ impl<Hash: Encode + Decode> Digest<Hash> {
 /// Digest item that is able to encode/decode 'system' digest items and
 /// provide opaque access to other items.
 #[derive(PartialEq, Eq, Clone, RuntimeDebug)]
+#[cfg_attr(feature = "std", derive(parity_util_mem::MallocSizeOf))]
 pub enum DigestItem<Hash> {
 	/// System digest item that contains the root of changes trie at given
 	/// block. It is created for every block iff runtime supports changes
@@ -86,6 +92,12 @@ pub enum DigestItem<Hash> {
 	/// the consensus engine can (and should) read them itself to avoid
 	/// code and state duplication. It is erroneous for a runtime to produce
 	/// these, but this is not (yet) checked.
+	///
+	/// NOTE: the runtime is not allowed to panic or fail in an `on_initialize`
+	/// call if an expected `PreRuntime` digest is not present. It is the
+	/// responsibility of a external block verifier to check this. Runtime API calls
+	/// will initialize the block without pre-runtime digests, so initialization
+	/// cannot fail when they are missing.
 	PreRuntime(ConsensusEngineId, Vec<u8>),
 
 	/// A message from the runtime to the consensus engine. This should *never*
@@ -107,7 +119,7 @@ pub enum DigestItem<Hash> {
 
 /// Available changes trie signals.
 #[derive(PartialEq, Eq, Clone, Encode, Decode)]
-#[cfg_attr(feature = "std", derive(Debug))]
+#[cfg_attr(feature = "std", derive(Debug, parity_util_mem::MallocSizeOf))]
 pub enum ChangesTrieSignal {
 	/// New changes trie configuration is enacted, starting from **next block**.
 	///
@@ -358,7 +370,7 @@ impl<'a, Hash> DigestItemRef<'a, Hash> {
 	}
 
 	/// Try to match this digest item to the given opaque item identifier; if it matches, then
-	/// try to cast to the given datatype; if that works, return it.
+	/// try to cast to the given data type; if that works, return it.
 	pub fn try_to<T: Decode>(&self, id: OpaqueDigestItemId) -> Option<T> {
 		self.try_as_raw(id).and_then(|mut x| Decode::decode(&mut x).ok())
 	}

@@ -1,18 +1,19 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Tests for the module.
 
@@ -282,7 +283,7 @@ fn slash_payout_multi_works() {
 }
 
 #[test]
-fn suspended_member_lifecycle_works() {
+fn suspended_member_life_cycle_works() {
 	EnvBuilder::new().execute(|| {
 		// Add 20 to members, who is not the head and can be suspended/removed.
 		assert_ok!(Society::add_member(&20));
@@ -577,14 +578,14 @@ fn challenges_work() {
 		assert_eq!(Society::defender(), None);
 		// 20 will be challenged during the challenge rotation
 		run_to_block(8);
-		assert_eq!(Society::defender(), Some(20));
+		assert_eq!(Society::defender(), Some(30));
 		// They can always free vote for themselves
-		assert_ok!(Society::defender_vote(Origin::signed(20), true));
+		assert_ok!(Society::defender_vote(Origin::signed(30), true));
 		// If no one else votes, nothing happens
 		run_to_block(16);
 		assert_eq!(Society::members(), vec![10, 20, 30, 40]);
 		// New challenge period
-		assert_eq!(Society::defender(), Some(20));
+		assert_eq!(Society::defender(), Some(30));
 		// Non-member cannot challenge
 		assert_noop!(Society::defender_vote(Origin::signed(1), true), Error::<Test, _>::NotMember);
 		// 3 people say accept, 1 reject
@@ -601,7 +602,7 @@ fn challenges_work() {
 		assert_eq!(<DefenderVotes<Test>>::get(30), None);
 		assert_eq!(<DefenderVotes<Test>>::get(40), None);
 		// One more time
-		assert_eq!(Society::defender(), Some(20));
+		assert_eq!(Society::defender(), Some(30));
 		// 2 people say accept, 2 reject
 		assert_ok!(Society::defender_vote(Origin::signed(10), true));
 		assert_ok!(Society::defender_vote(Origin::signed(20), true));
@@ -609,10 +610,10 @@ fn challenges_work() {
 		assert_ok!(Society::defender_vote(Origin::signed(40), false));
 		run_to_block(32);
 		// 20 is suspended
-		assert_eq!(Society::members(), vec![10, 30, 40]);
-		assert_eq!(Society::suspended_member(20), true);
+		assert_eq!(Society::members(), vec![10, 20, 40]);
+		assert_eq!(Society::suspended_member(30), true);
 		// New defender is chosen
-		assert_eq!(Society::defender(), Some(40));
+		assert_eq!(Society::defender(), Some(20));
 		// Votes are reset
 		assert_eq!(<DefenderVotes<Test>>::get(10), None);
 		assert_eq!(<DefenderVotes<Test>>::get(20), None);
@@ -812,7 +813,7 @@ fn max_limits_work() {
 		// No candidates because full
 		assert_eq!(Society::candidates().len(), 0);
 		// Increase member limit
-		assert_ok!(Society::set_max_members(Origin::ROOT, 200));
+		assert_ok!(Society::set_max_members(Origin::root(), 200));
 		// Rotate period
 		run_to_block(16);
 		// Candidates are back!

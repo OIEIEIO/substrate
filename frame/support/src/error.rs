@@ -1,18 +1,19 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Macro for declaring a module error.
 
@@ -28,13 +29,14 @@ pub use frame_metadata::{ModuleErrorMetadata, ErrorMetadata, DecodeDifferent};
 /// implements `From<ErrorType> for DispatchResult` to make the error type usable as error
 /// in the dispatchable functions.
 ///
-/// It is required that the error type is registed in `decl_module!` to make the error
+/// It is required that the error type is registered in `decl_module!` to make the error
 /// exported in the metadata.
 ///
 /// # Usage
 ///
 /// ```
 /// # use frame_support::{decl_error, decl_module};
+/// #
 /// decl_error! {
 ///     /// Errors that can occur in my module.
 ///     pub enum MyError for Module<T: Trait> {
@@ -45,7 +47,7 @@ pub use frame_metadata::{ModuleErrorMetadata, ErrorMetadata, DecodeDifferent};
 ///     }
 /// }
 ///
-/// # use frame_system::{self as system, Trait};
+/// # use frame_system::Trait;
 ///
 /// // You need to register the error type in `decl_module!` as well to make the error
 /// // exported in the metadata.
@@ -54,6 +56,7 @@ pub use frame_metadata::{ModuleErrorMetadata, ErrorMetadata, DecodeDifferent};
 ///     pub struct Module<T: Trait> for enum Call where origin: T::Origin {
 ///         type Error = MyError<T>;
 ///
+///         #[weight = 0]
 ///         fn do_something(origin) -> frame_support::dispatch::DispatchResult {
 ///             Err(MyError::<T>::YouAreNotCoolEnough.into())
 ///         }
@@ -74,6 +77,7 @@ macro_rules! decl_error {
 				$generic:ident: $trait:path
 				$(, $inst_generic:ident: $instance:path)?
 			>
+			$( where $( $where_ty:ty: $where_bound:path ),* $(,)? )?
 		{
 			$(
 				$( #[doc = $doc_attr:tt] )*
@@ -83,11 +87,13 @@ macro_rules! decl_error {
 		}
 	) => {
 		$(#[$attr])*
-		pub enum $error<$generic: $trait $(, $inst_generic: $instance)?> {
+		pub enum $error<$generic: $trait $(, $inst_generic: $instance)?>
+		$( where $( $where_ty: $where_bound ),* )?
+		{
 			#[doc(hidden)]
 			__Ignore(
 				$crate::sp_std::marker::PhantomData<($generic, $( $inst_generic)?)>,
-				$crate::dispatch::Never,
+				$crate::Never,
 			),
 			$(
 				$( #[doc = $doc_attr] )*
@@ -97,13 +103,16 @@ macro_rules! decl_error {
 
 		impl<$generic: $trait $(, $inst_generic: $instance)?> $crate::sp_std::fmt::Debug
 			for $error<$generic $(, $inst_generic)?>
+		$( where $( $where_ty: $where_bound ),* )?
 		{
 			fn fmt(&self, f: &mut $crate::sp_std::fmt::Formatter<'_>) -> $crate::sp_std::fmt::Result {
 				f.write_str(self.as_str())
 			}
 		}
 
-		impl<$generic: $trait $(, $inst_generic: $instance)?> $error<$generic $(, $inst_generic)?> {
+		impl<$generic: $trait $(, $inst_generic: $instance)?> $error<$generic $(, $inst_generic)?>
+		$( where $( $where_ty: $where_bound ),* )?
+		{
 			fn as_u8(&self) -> u8 {
 				$crate::decl_error! {
 					@GENERATE_AS_U8
@@ -127,6 +136,7 @@ macro_rules! decl_error {
 
 		impl<$generic: $trait $(, $inst_generic: $instance)?> From<$error<$generic $(, $inst_generic)?>>
 			for &'static str
+		$( where $( $where_ty: $where_bound ),* )?
 		{
 			fn from(err: $error<$generic $(, $inst_generic)?>) -> &'static str {
 				err.as_str()
@@ -135,10 +145,11 @@ macro_rules! decl_error {
 
 		impl<$generic: $trait $(, $inst_generic: $instance)?> From<$error<$generic $(, $inst_generic)?>>
 			for $crate::sp_runtime::DispatchError
+		$( where $( $where_ty: $where_bound ),* )?
 		{
 			fn from(err: $error<$generic $(, $inst_generic)?>) -> Self {
-				let index = <$generic::ModuleToIndex as $crate::traits::ModuleToIndex>
-					::module_to_index::<$module<$generic $(, $inst_generic)?>>()
+				let index = <$generic::PalletInfo as $crate::traits::PalletInfo>
+					::index::<$module<$generic $(, $inst_generic)?>>()
 					.expect("Every active module has an index in the runtime; qed") as u8;
 
 				$crate::sp_runtime::DispatchError::Module {
@@ -151,6 +162,7 @@ macro_rules! decl_error {
 
 		impl<$generic: $trait $(, $inst_generic: $instance)?> $crate::error::ModuleErrorMetadata
 			for $error<$generic $(, $inst_generic)?>
+		$( where $( $where_ty: $where_bound ),* )?
 		{
 			fn metadata() -> &'static [$crate::error::ErrorMetadata] {
 				&[

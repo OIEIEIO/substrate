@@ -1,18 +1,19 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Generic implementation of a block header.
 
@@ -20,8 +21,9 @@
 use serde::{Deserialize, Serialize};
 use crate::codec::{Decode, Encode, Codec, Input, Output, HasCompact, EncodeAsRef, Error};
 use crate::traits::{
-	self, Member, SimpleArithmetic, SimpleBitOps, Hash as HashT,
+	self, Member, AtLeast32BitUnsigned, SimpleBitOps, Hash as HashT,
 	MaybeSerializeDeserialize, MaybeSerialize, MaybeDisplay,
+	MaybeMallocSizeOf,
 };
 use crate::generic::Digest;
 use sp_core::U256;
@@ -49,6 +51,22 @@ pub struct Header<Number: Copy + Into<U256> + TryFrom<U256>, Hash: HashT> {
 	pub extrinsics_root: Hash::Output,
 	/// A chain-specific digest of data useful for light clients or referencing auxiliary data.
 	pub digest: Digest<Hash::Output>,
+}
+
+#[cfg(feature = "std")]
+impl<Number, Hash> parity_util_mem::MallocSizeOf for Header<Number, Hash>
+where
+	Number: Copy + Into<U256> + TryFrom<U256> + parity_util_mem::MallocSizeOf,
+	Hash: HashT,
+	Hash::Output: parity_util_mem::MallocSizeOf,
+{
+	fn size_of(&self, ops: &mut parity_util_mem::MallocSizeOfOps) -> usize {
+		self.parent_hash.size_of(ops) +
+			self.number.size_of(ops) +
+			self.state_root.size_of(ops) +
+			self.extrinsics_root.size_of(ops) +
+			self.digest.size_of(ops)
+	}
 }
 
 #[cfg(feature = "std")]
@@ -105,10 +123,11 @@ impl<Number, Hash> codec::EncodeLike for Header<Number, Hash> where
 
 impl<Number, Hash> traits::Header for Header<Number, Hash> where
 	Number: Member + MaybeSerializeDeserialize + Debug + sp_std::hash::Hash + MaybeDisplay +
-		SimpleArithmetic + Codec + Copy + Into<U256> + TryFrom<U256> + sp_std::str::FromStr,
+		AtLeast32BitUnsigned + Codec + Copy + Into<U256> + TryFrom<U256> + sp_std::str::FromStr +
+		MaybeMallocSizeOf,
 	Hash: HashT,
 	Hash::Output: Default + sp_std::hash::Hash + Copy + Member + Ord +
-		MaybeSerialize + Debug + MaybeDisplay + SimpleBitOps + Codec,
+		MaybeSerialize + Debug + MaybeDisplay + SimpleBitOps + Codec + MaybeMallocSizeOf,
 {
 	type Number = Number;
 	type Hash = <Hash as HashT>::Output;
@@ -152,7 +171,8 @@ impl<Number, Hash> traits::Header for Header<Number, Hash> where
 }
 
 impl<Number, Hash> Header<Number, Hash> where
-	Number: Member + sp_std::hash::Hash + Copy + MaybeDisplay + SimpleArithmetic + Codec + Into<U256> + TryFrom<U256>,
+	Number: Member + sp_std::hash::Hash + Copy + MaybeDisplay + AtLeast32BitUnsigned + Codec +
+		Into<U256> + TryFrom<U256>,
 	Hash: HashT,
 	Hash::Output: Default + sp_std::hash::Hash + Copy + Member + MaybeDisplay + SimpleBitOps + Codec,
  {

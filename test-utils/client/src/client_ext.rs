@@ -1,23 +1,25 @@
-// Copyright 2018-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Client extension for tests.
 
-use sc_client::{self, Client};
+use sc_service::client::Client;
 use sc_client_api::backend::Finalizer;
+use sc_client_api::client::BlockBackend;
 use sp_consensus::{
 	BlockImportParams, BlockImport, BlockOrigin, Error as ConsensusError,
 	ForkChoiceStrategy,
@@ -64,7 +66,7 @@ pub trait ClientBlockImportExt<Block: BlockT>: Sized {
 impl<B, E, RA, Block> ClientExt<Block> for Client<B, E, Block, RA>
 	where
 		B: sc_client_api::backend::Backend<Block>,
-		E: sc_client::CallExecutor<Block> + 'static,
+		E: sc_client_api::CallExecutor<Block> + 'static,
 		Self: BlockImport<Block, Error = ConsensusError>,
 		Block: BlockT,
 {
@@ -77,7 +79,7 @@ impl<B, E, RA, Block> ClientExt<Block> for Client<B, E, Block, RA>
 	}
 
 	fn genesis_hash(&self) -> <Block as BlockT>::Hash {
-		self.block_hash(0.into()).unwrap().unwrap()
+		self.block_hash(0u32.into()).unwrap().unwrap()
 	}
 }
 
@@ -87,60 +89,28 @@ impl<Block: BlockT, T, Transaction> ClientBlockImportExt<Block> for std::sync::A
 {
 	fn import(&mut self, origin: BlockOrigin, block: Block) -> Result<(), ConsensusError> {
 		let (header, extrinsics) = block.deconstruct();
-		let import = BlockImportParams {
-			origin,
-			header,
-			justification: None,
-			post_digests: vec![],
-			body: Some(extrinsics),
-			storage_changes: None,
-			finalized: false,
-			auxiliary: Vec::new(),
-			intermediates: Default::default(),
-			fork_choice: Some(ForkChoiceStrategy::LongestChain),
-			allow_missing_state: false,
-			import_existing: false,
-		};
+		let mut import = BlockImportParams::new(origin, header);
+		import.body = Some(extrinsics);
+		import.fork_choice = Some(ForkChoiceStrategy::LongestChain);
 
 		BlockImport::import_block(self, import, HashMap::new()).map(|_| ())
 	}
 
 	fn import_as_best(&mut self, origin: BlockOrigin, block: Block) -> Result<(), ConsensusError> {
 		let (header, extrinsics) = block.deconstruct();
-		let import = BlockImportParams {
-			origin,
-			header,
-			justification: None,
-			post_digests: vec![],
-			body: Some(extrinsics),
-			storage_changes: None,
-			finalized: false,
-			auxiliary: Vec::new(),
-			intermediates: Default::default(),
-			fork_choice: Some(ForkChoiceStrategy::Custom(true)),
-			allow_missing_state: false,
-			import_existing: false,
-		};
+		let mut import = BlockImportParams::new(origin, header);
+		import.body = Some(extrinsics);
+		import.fork_choice = Some(ForkChoiceStrategy::Custom(true));
 
 		BlockImport::import_block(self, import, HashMap::new()).map(|_| ())
 	}
 
 	fn import_as_final(&mut self, origin: BlockOrigin, block: Block) -> Result<(), ConsensusError> {
 		let (header, extrinsics) = block.deconstruct();
-		let import = BlockImportParams {
-			origin,
-			header,
-			justification: None,
-			post_digests: vec![],
-			body: Some(extrinsics),
-			storage_changes: None,
-			finalized: true,
-			auxiliary: Vec::new(),
-			intermediates: Default::default(),
-			fork_choice: Some(ForkChoiceStrategy::Custom(true)),
-			allow_missing_state: false,
-			import_existing: false,
-		};
+		let mut import = BlockImportParams::new(origin, header);
+		import.body = Some(extrinsics);
+		import.finalized = true;
+		import.fork_choice = Some(ForkChoiceStrategy::Custom(true));
 
 		BlockImport::import_block(self, import, HashMap::new()).map(|_| ())
 	}
@@ -152,20 +122,11 @@ impl<Block: BlockT, T, Transaction> ClientBlockImportExt<Block> for std::sync::A
 		justification: Justification,
 	) -> Result<(), ConsensusError> {
 		let (header, extrinsics) = block.deconstruct();
-		let import = BlockImportParams {
-			origin,
-			header,
-			justification: Some(justification),
-			post_digests: vec![],
-			body: Some(extrinsics),
-			storage_changes: None,
-			finalized: true,
-			auxiliary: Vec::new(),
-			intermediates: Default::default(),
-			fork_choice: Some(ForkChoiceStrategy::LongestChain),
-			allow_missing_state: false,
-			import_existing: false,
-		};
+		let mut import = BlockImportParams::new(origin, header);
+		import.justification = Some(justification);
+		import.body = Some(extrinsics);
+		import.finalized = true;
+		import.fork_choice = Some(ForkChoiceStrategy::LongestChain);
 
 		BlockImport::import_block(self, import, HashMap::new()).map(|_| ())
 	}
@@ -177,60 +138,28 @@ impl<B, E, RA, Block: BlockT> ClientBlockImportExt<Block> for Client<B, E, Block
 {
 	fn import(&mut self, origin: BlockOrigin, block: Block) -> Result<(), ConsensusError> {
 		let (header, extrinsics) = block.deconstruct();
-		let import = BlockImportParams {
-			origin,
-			header,
-			justification: None,
-			post_digests: vec![],
-			body: Some(extrinsics),
-			storage_changes: None,
-			finalized: false,
-			auxiliary: Vec::new(),
-			intermediates: Default::default(),
-			fork_choice: Some(ForkChoiceStrategy::LongestChain),
-			allow_missing_state: false,
-			import_existing: false,
-		};
+		let mut import = BlockImportParams::new(origin, header);
+		import.body = Some(extrinsics);
+		import.fork_choice = Some(ForkChoiceStrategy::LongestChain);
 
 		BlockImport::import_block(self, import, HashMap::new()).map(|_| ())
 	}
 
 	fn import_as_best(&mut self, origin: BlockOrigin, block: Block) -> Result<(), ConsensusError> {
 		let (header, extrinsics) = block.deconstruct();
-		let import = BlockImportParams {
-			origin,
-			header,
-			justification: None,
-			post_digests: vec![],
-			body: Some(extrinsics),
-			storage_changes: None,
-			finalized: false,
-			auxiliary: Vec::new(),
-			intermediates: Default::default(),
-			fork_choice: Some(ForkChoiceStrategy::Custom(true)),
-			allow_missing_state: false,
-			import_existing: false,
-		};
+		let mut import = BlockImportParams::new(origin, header);
+		import.body = Some(extrinsics);
+		import.fork_choice = Some(ForkChoiceStrategy::Custom(true));
 
 		BlockImport::import_block(self, import, HashMap::new()).map(|_| ())
 	}
 
 	fn import_as_final(&mut self, origin: BlockOrigin, block: Block) -> Result<(), ConsensusError> {
 		let (header, extrinsics) = block.deconstruct();
-		let import = BlockImportParams {
-			origin,
-			header,
-			justification: None,
-			post_digests: vec![],
-			body: Some(extrinsics),
-			storage_changes: None,
-			finalized: true,
-			auxiliary: Vec::new(),
-			intermediates: Default::default(),
-			fork_choice: Some(ForkChoiceStrategy::Custom(true)),
-			allow_missing_state: false,
-			import_existing: false,
-		};
+		let mut import = BlockImportParams::new(origin, header);
+		import.body = Some(extrinsics);
+		import.finalized = true;
+		import.fork_choice = Some(ForkChoiceStrategy::Custom(true));
 
 		BlockImport::import_block(self, import, HashMap::new()).map(|_| ())
 	}
@@ -242,20 +171,11 @@ impl<B, E, RA, Block: BlockT> ClientBlockImportExt<Block> for Client<B, E, Block
 		justification: Justification,
 	) -> Result<(), ConsensusError> {
 		let (header, extrinsics) = block.deconstruct();
-		let import = BlockImportParams {
-			origin,
-			header,
-			justification: Some(justification),
-			post_digests: vec![],
-			body: Some(extrinsics),
-			storage_changes: None,
-			finalized: true,
-			auxiliary: Vec::new(),
-			intermediates: Default::default(),
-			fork_choice: Some(ForkChoiceStrategy::LongestChain),
-			allow_missing_state: false,
-			import_existing: false,
-		};
+		let mut import = BlockImportParams::new(origin, header);
+		import.justification = Some(justification);
+		import.body = Some(extrinsics);
+		import.finalized = true;
+		import.fork_choice = Some(ForkChoiceStrategy::LongestChain);
 
 		BlockImport::import_block(self, import, HashMap::new()).map(|_| ())
 	}

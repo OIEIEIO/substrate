@@ -1,18 +1,19 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! The block builder runtime api.
 
@@ -22,37 +23,10 @@ use sp_runtime::{traits::Block as BlockT, ApplyExtrinsicResult};
 
 use sp_inherents::{InherentData, CheckInherentsResult};
 
-/// Definitions for supporting the older version of API: v3
-///
-/// These definitions are taken from the 2c58e30246a029b53d51e5b24c31974ac539ee8b git revision.
-#[deprecated(note = "These definitions here are only for compatibility reasons")]
-pub mod compatability_v3 {
-	use sp_runtime::{DispatchOutcome, transaction_validity};
-	use codec::{Encode, Decode};
-
-	#[derive(Eq, PartialEq, Clone, Copy, Decode, Encode, Debug)]
-	pub enum ApplyError {
-		NoPermission,
-		BadState,
-		Validity(transaction_validity::TransactionValidityError),
-	}
-
-	// `ApplyOutcome` was renamed to `DispatchOutcome` with the layout preserved.
-	pub type ApplyResult = Result<DispatchOutcome, ApplyError>;
-}
-
 sp_api::decl_runtime_apis! {
 	/// The `BlockBuilder` api trait that provides the required functionality for building a block.
 	#[api_version(4)]
 	pub trait BlockBuilder {
-		/// Compatibility version of `apply_extrinsic` for v3.
-		///
-		/// Only the return type is changed.
-		#[changed_in(4)]
-		#[allow(deprecated)]
-		fn apply_extrinsic(extrinsic: <Block as BlockT>::Extrinsic)
-			-> self::compatability_v3::ApplyResult;
-
 		/// Apply the given extrinsic.
 		///
 		/// Returns an inclusion outcome which specifies if this extrinsic is included in

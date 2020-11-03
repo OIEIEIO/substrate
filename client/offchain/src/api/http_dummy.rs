@@ -19,8 +19,18 @@
 use sp_core::offchain::{HttpRequestId, Timestamp, HttpRequestStatus, HttpError};
 use std::{future::Future, pin::Pin, task::Context, task::Poll};
 
+/// Wrapper struct (wrapping nothing in case of http_dummy) used for keeping the hyper_rustls client running.
+#[derive(Clone)]
+pub struct SharedClient;
+
+impl SharedClient {
+	pub fn new() -> Self {
+		Self
+	}
+}
+
 /// Creates a pair of [`HttpApi`] and [`HttpWorker`].
-pub fn http() -> (HttpApi, HttpWorker) {
+pub fn http(_: SharedClient) -> (HttpApi, HttpWorker) {
 	(HttpApi, HttpWorker)
 }
 
@@ -33,7 +43,7 @@ pub struct HttpApi;
 pub struct HttpWorker;
 
 impl HttpApi {
-	/// Mimicks the corresponding method in the offchain API.
+	/// Mimics the corresponding method in the offchain API.
 	pub fn request_start(
 		&mut self,
 		_: &str,
@@ -43,7 +53,7 @@ impl HttpApi {
 		Err(())
 	}
 
-	/// Mimicks the corresponding method in the offchain API.
+	/// Mimics the corresponding method in the offchain API.
 	pub fn request_add_header(
 		&mut self,
 		_: HttpRequestId,
@@ -54,7 +64,7 @@ impl HttpApi {
 			never be called; qed")
 	}
 
-	/// Mimicks the corresponding method in the offchain API.
+	/// Mimics the corresponding method in the offchain API.
 	pub fn request_write_body(
 		&mut self,
 		_: HttpRequestId,
@@ -65,7 +75,7 @@ impl HttpApi {
 			never be called; qed")
 	}
 
-	/// Mimicks the corresponding method in the offchain API.
+	/// Mimics the corresponding method in the offchain API.
 	pub fn response_wait(
 		&mut self,
 		requests: &[HttpRequestId],
@@ -79,7 +89,7 @@ impl HttpApi {
 		}
 	}
 
-	/// Mimicks the corresponding method in the offchain API.
+	/// Mimics the corresponding method in the offchain API.
 	pub fn response_headers(
 		&mut self,
 		_: HttpRequestId
@@ -88,7 +98,7 @@ impl HttpApi {
 			never be called; qed")
 	}
 
-	/// Mimicks the corresponding method in the offchain API.
+	/// Mimics the corresponding method in the offchain API.
 	pub fn response_read_body(
 		&mut self,
 		_: HttpRequestId,

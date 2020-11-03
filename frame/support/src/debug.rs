@@ -1,18 +1,19 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Runtime debugging and logging utilities.
 //!
@@ -24,7 +25,7 @@
 //! and size of the blob. Luckily there are some ways to mitigate
 //! this that are described below.
 //!
-//! First component to utilize debug-printing and loggin is actually
+//! First component to utilize debug-printing and logging is actually
 //! located in `primitives` crate: `sp_core::RuntimeDebug`.
 //! This custom-derive generates `core::fmt::Debug` implementation,
 //! just like regular `derive(Debug)`, however it does not generate
@@ -86,11 +87,11 @@
 //!	native::print!("My struct: {:?}", x);
 //! ```
 
-use sp_std::vec::Vec;
 use sp_std::fmt::{self, Debug};
 
 pub use log::{info, debug, error, trace, warn};
 pub use crate::runtime_print as print;
+pub use sp_std::Writer;
 
 /// Native-only logging.
 ///
@@ -129,34 +130,18 @@ pub mod native {
 #[macro_export]
 macro_rules! runtime_print {
 	($($arg:tt)+) => {
-		use core::fmt::Write;
-		let mut w = $crate::debug::Writer::default();
-		let _ = core::write!(&mut w, $($arg)+);
-		w.print();
+		{
+			use core::fmt::Write;
+			let mut w = $crate::sp_std::Writer::default();
+			let _ = core::write!(&mut w, $($arg)+);
+			sp_io::misc::print_utf8(&w.inner())
+		}
 	}
 }
 
 /// Print out the debuggable type.
 pub fn debug(data: &impl Debug) {
 	runtime_print!("{:?}", data);
-}
-
-/// A target for `core::write!` macro - constructs a string in memory.
-#[derive(Default)]
-pub struct Writer(Vec<u8>);
-
-impl fmt::Write for Writer {
-	fn write_str(&mut self, s: &str) -> fmt::Result {
-		self.0.extend(s.as_bytes());
-		Ok(())
-	}
-}
-
-impl Writer {
-	/// Print the content of this `Writer` out.
-	pub fn print(&self) {
-		sp_io::misc::print_utf8(&self.0)
-	}
 }
 
 /// Runtime logger implementation - `log` crate backend.
@@ -185,8 +170,16 @@ impl RuntimeLogger {
 	/// This is a no-op when running natively (`std`).
 	#[cfg(not(feature = "std"))]
 	pub fn init() {
-		static LOGGER: RuntimeLogger = RuntimeLogger;;
+		static LOGGER: RuntimeLogger = RuntimeLogger;
 		let _ = log::set_logger(&LOGGER);
+
+		// Set max level to `TRACE` to ensure we propagate
+		// all log entries to the native side that will do the
+		// final filtering on what should be printed.
+		//
+		// If we don't set any level, logging is disabled
+		// completly.
+		log::set_max_level(log::LevelFilter::Trace);
 	}
 }
 
@@ -201,15 +194,54 @@ impl log::Log for RuntimeLogger {
 
 	fn log(&self, record: &log::Record) {
 		use fmt::Write;
-		let mut w = Writer::default();
+		let mut w = sp_std::Writer::default();
 		let _ = core::write!(&mut w, "{}", record.args());
 
 		sp_io::logging::log(
 			record.level().into(),
 			record.target(),
-			&w.0,
+			w.inner(),
 		);
 	}
 
 	fn flush(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+	use substrate_test_runtime_client::{
+		ExecutionStrategy, TestClientBuilderExt, DefaultTestClientBuilderExt,
+		TestClientBuilder, runtime::TestAPI,
+	};
+	use sp_api::ProvideRuntimeApi;
+	use sp_runtime::generic::BlockId;
+
+	#[test]
+	fn ensure_runtime_logger_works() {
+		let executable = std::env::current_exe().unwrap();
+		let output = std::process::Command::new(executable)
+			.env("RUN_TEST", "1")
+			.env("RUST_LOG", "trace")
+			.args(&["--nocapture", "ensure_runtime_logger_works_implementation"])
+			.output()
+			.unwrap();
+
+		let output = dbg!(String::from_utf8(output.stderr).unwrap());
+		assert!(output.contains("Hey I'm runtime"));
+	}
+
+	/// This is no actual test. It will be called by `ensure_runtime_logger_works`
+	/// to check that the runtime can print from the wasm side using the
+	/// `RuntimeLogger`.
+	#[test]
+	fn ensure_runtime_logger_works_implementation() {
+		if std::env::var("RUN_TEST").is_ok() {
+			sp_tracing::try_init_simple();
+
+			let client = TestClientBuilder::new().set_execution_strategy(ExecutionStrategy::AlwaysWasm).build();
+			let runtime_api = client.runtime_api();
+			let block_id = BlockId::Number(0);
+			runtime_api.do_trace_log(&block_id).expect("Logging should not fail");
+		}
+	}
 }

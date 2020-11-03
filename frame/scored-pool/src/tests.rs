@@ -1,26 +1,27 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Tests for the module.
 
 use super::*;
 use mock::*;
 
-use frame_support::{assert_ok, assert_noop};
-use sp_runtime::traits::{OnInitialize, BadOrigin};
+use frame_support::{assert_ok, assert_noop, traits::OnInitialize};
+use sp_runtime::traits::BadOrigin;
 
 type ScoredPool = Module<Test>;
 type System = frame_system::Module<Test>;
@@ -30,8 +31,8 @@ type Balances = pallet_balances::Module<Test>;
 fn query_membership_works() {
 	new_test_ext().execute_with(|| {
 		assert_eq!(ScoredPool::members(), vec![20, 40]);
-		assert_eq!(Balances::reserved_balance(&31), CandidateDeposit::get());
-		assert_eq!(Balances::reserved_balance(&40), CandidateDeposit::get());
+		assert_eq!(Balances::reserved_balance(31), CandidateDeposit::get());
+		assert_eq!(Balances::reserved_balance(40), CandidateDeposit::get());
 		assert_eq!(MEMBERS.with(|m| m.borrow().clone()), vec![20, 40]);
 	});
 }
@@ -61,7 +62,7 @@ fn submit_candidacy_works() {
 		assert_eq!(fetch_from_pool(15), Some((who, None)));
 
 		// then
-		assert_eq!(Balances::reserved_balance(&who), CandidateDeposit::get());
+		assert_eq!(Balances::reserved_balance(who), CandidateDeposit::get());
 	});
 }
 
@@ -117,7 +118,7 @@ fn kicking_works() {
 	new_test_ext().execute_with(|| {
 		// given
 		let who = 40;
-		assert_eq!(Balances::reserved_balance(&who), CandidateDeposit::get());
+		assert_eq!(Balances::reserved_balance(who), CandidateDeposit::get());
 		assert_eq!(find_in_pool(who), Some(0));
 
 		// when
@@ -128,7 +129,7 @@ fn kicking_works() {
 		assert_eq!(find_in_pool(who), None);
 		assert_eq!(ScoredPool::members(), vec![20, 31]);
 		assert_eq!(MEMBERS.with(|m| m.borrow().clone()), ScoredPool::members());
-		assert_eq!(Balances::reserved_balance(&who), 0); // deposit must have been returned
+		assert_eq!(Balances::reserved_balance(who), 0); // deposit must have been returned
 	});
 }
 
@@ -152,7 +153,7 @@ fn unscored_entities_must_not_be_used_for_filling_members() {
 
 		// then
 		// the `None` candidates should not have been filled in
-		assert_eq!(ScoredPool::members(), vec![]);
+		assert!(ScoredPool::members().is_empty());
 		assert_eq!(MEMBERS.with(|m| m.borrow().clone()), ScoredPool::members());
 	});
 }
@@ -246,7 +247,7 @@ fn withdraw_scored_candidacy_must_work() {
 	new_test_ext().execute_with(|| {
 		// given
 		let who = 40;
-		assert_eq!(Balances::reserved_balance(&who), CandidateDeposit::get());
+		assert_eq!(Balances::reserved_balance(who), CandidateDeposit::get());
 
 		// when
 		let index = find_in_pool(who).expect("entity must be in pool") as u32;
@@ -255,7 +256,7 @@ fn withdraw_scored_candidacy_must_work() {
 		// then
 		assert_eq!(fetch_from_pool(who), None);
 		assert_eq!(ScoredPool::members(), vec![20, 31]);
-		assert_eq!(Balances::reserved_balance(&who), 0);
+		assert_eq!(Balances::reserved_balance(who), 0);
 	});
 }
 

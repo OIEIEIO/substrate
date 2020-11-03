@@ -26,30 +26,11 @@
 //! this guarantees that every instrumented contract code in cache cannot have the version equal to the current one.
 //! Thus, before executing a contract it should be reinstrument with new schedule.
 
-use crate::gas::{Gas, GasMeter, Token};
 use crate::wasm::{prepare, runtime::Env, PrefabWasmModule};
 use crate::{CodeHash, CodeStorage, PristineCode, Schedule, Trait};
 use sp_std::prelude::*;
-use sp_runtime::traits::{Hash, Bounded};
+use sp_runtime::traits::Hash;
 use frame_support::StorageMap;
-
-/// Gas metering token that used for charging storing code into the code storage.
-///
-/// Specifies the code length in bytes.
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-#[derive(Copy, Clone)]
-pub struct PutCodeToken(u32);
-
-impl<T: Trait> Token<T> for PutCodeToken {
-	type Metadata = Schedule;
-
-	fn calculate_amount(&self, metadata: &Schedule) -> Gas {
-		metadata
-			.put_code_per_byte_cost
-			.checked_mul(self.0.into())
-			.unwrap_or_else(|| Bounded::max_value())
-	}
-}
 
 /// Put code in the storage. The hash of code is used as a key and is returned
 /// as a result of this function.
@@ -57,19 +38,27 @@ impl<T: Trait> Token<T> for PutCodeToken {
 /// This function instruments the given code and caches it in the storage.
 pub fn save<T: Trait>(
 	original_code: Vec<u8>,
-	gas_meter: &mut GasMeter<T>,
-	schedule: &Schedule,
+	schedule: &Schedule<T>,
 ) -> Result<CodeHash<T>, &'static str> {
-	// The first time instrumentation is on the user. However, consequent reinstrumentation
-	// due to the schedule changes is on governance system.
-	if gas_meter
-		.charge(schedule, PutCodeToken(original_code.len() as u32))
-		.is_out_of_gas()
-	{
-		return Err("there is not enough gas for storing the code");
-	}
+	let prefab_module = prepare::prepare_contract::<Env, T>(&original_code, schedule)?;
+	let code_hash = T::Hashing::hash(&original_code);
 
-	let prefab_module = prepare::prepare_contract::<Env>(&original_code, schedule)?;
+	<CodeStorage<T>>::insert(code_hash, prefab_module);
+	<PristineCode<T>>::insert(code_hash, original_code);
+
+	Ok(code_hash)
+}
+
+/// Version of `save` to be used in runtime benchmarks.
+//
+/// This version neither checks nor instruments the passed in code. This is useful
+/// when code needs to be benchmarked without the injected instrumentation.
+#[cfg(feature = "runtime-benchmarks")]
+pub fn save_raw<T: Trait>(
+	original_code: Vec<u8>,
+	schedule: &Schedule<T>,
+) -> Result<CodeHash<T>, &'static str> {
+	let prefab_module = prepare::benchmarking::prepare_contract::<T>(&original_code, schedule)?;
 	let code_hash = T::Hashing::hash(&original_code);
 
 	<CodeStorage<T>>::insert(code_hash, prefab_module);
@@ -85,7 +74,7 @@ pub fn save<T: Trait>(
 /// re-instrumentation and update the cache in the storage.
 pub fn load<T: Trait>(
 	code_hash: &CodeHash<T>,
-	schedule: &Schedule,
+	schedule: &Schedule<T>,
 ) -> Result<PrefabWasmModule, &'static str> {
 	let mut prefab_module =
 		<CodeStorage<T>>::get(code_hash).ok_or_else(|| "code is not found")?;
@@ -97,7 +86,7 @@ pub fn load<T: Trait>(
 		// We need to re-instrument the code with the latest schedule here.
 		let original_code =
 			<PristineCode<T>>::get(code_hash).ok_or_else(|| "pristine code is not found")?;
-		prefab_module = prepare::prepare_contract::<Env>(&original_code, schedule)?;
+		prefab_module = prepare::prepare_contract::<Env, T>(&original_code, schedule)?;
 		<CodeStorage<T>>::insert(&code_hash, &prefab_module);
 	}
 	Ok(prefab_module)

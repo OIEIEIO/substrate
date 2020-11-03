@@ -18,7 +18,8 @@
 
 use crate::BlockStatus;
 use sp_runtime::{generic::BlockId, traits::Block};
-use std::{error::Error, sync::Arc};
+use std::{error::Error, future::Future, pin::Pin, sync::Arc};
+use futures::FutureExt as _;
 
 /// A type which provides access to chain information.
 pub trait Chain<B: Block> {
@@ -36,7 +37,10 @@ impl<T: Chain<B>, B: Block> Chain<B> for Arc<T> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Validation {
 	/// Valid block announcement.
-	Success,
+	Success {
+		/// Is this the new best block of the node?
+		is_new_best: bool,
+	},
 	/// Invalid block announcement.
 	Failure,
 }
@@ -44,23 +48,28 @@ pub enum Validation {
 /// Type which checks incoming block announcements.
 pub trait BlockAnnounceValidator<B: Block> {
 	/// Validate the announced header and its associated data.
-	fn validate(&mut self, header: &B::Header, data: &[u8]) -> Result<Validation, Box<dyn Error + Send>>;
+	///
+	/// # Note
+	///
+	/// Returning [`Validation::Failure`] will lead to a decrease of the
+	/// peers reputation as it sent us invalid data.
+	fn validate(
+		&mut self,
+		header: &B::Header,
+		data: &[u8],
+	) -> Pin<Box<dyn Future<Output = Result<Validation, Box<dyn Error + Send>>> + Send>>;
 }
 
 /// Default implementation of `BlockAnnounceValidator`.
 #[derive(Debug)]
-pub struct DefaultBlockAnnounceValidator<C> {
-	chain: C
-}
+pub struct DefaultBlockAnnounceValidator;
 
-impl<C> DefaultBlockAnnounceValidator<C> {
-	pub fn new(chain: C) -> Self {
-		Self { chain }
-	}
-}
-
-impl<B: Block, C: Chain<B>> BlockAnnounceValidator<B> for DefaultBlockAnnounceValidator<C> {
-	fn validate(&mut self, _h: &B::Header, _d: &[u8]) -> Result<Validation, Box<dyn Error + Send>> {
-		Ok(Validation::Success)
+impl<B: Block> BlockAnnounceValidator<B> for DefaultBlockAnnounceValidator {
+	fn validate(
+		&mut self,
+		_: &B::Header,
+		_: &[u8],
+	) -> Pin<Box<dyn Future<Output = Result<Validation, Box<dyn Error + Send>>> + Send>> {
+		async { Ok(Validation::Success { is_new_best: false }) }.boxed()
 	}
 }

@@ -1,18 +1,19 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Provides the [`PassBy`](PassBy) trait to simplify the implementation of the
 //! runtime interface traits for custom types.
@@ -32,7 +33,7 @@ use sp_wasm_interface::{FunctionContext, Pointer, Result};
 use sp_std::{marker::PhantomData, convert::TryFrom};
 
 #[cfg(not(feature = "std"))]
-use sp_std::{slice, vec::Vec};
+use sp_std::vec::Vec;
 
 /// Derive macro for implementing [`PassBy`] with the [`Codec`] strategy.
 ///
@@ -255,8 +256,13 @@ impl<T: codec::Codec> PassByImpl<T> for Codec<T> {
 		let (ptr, len) = unpack_ptr_and_len(arg);
 		let len = len as usize;
 
-		let slice = unsafe { slice::from_raw_parts(ptr as *const u8, len) };
-		T::decode(&mut &slice[..]).expect("Host to wasm values are encoded correctly; qed")
+		let encoded = if len == 0 {
+			Vec::new()
+		} else {
+			unsafe { Vec::from_raw_parts(ptr as *mut u8, len, len) }
+		};
+
+		T::decode(&mut &encoded[..]).expect("Host to wasm values are encoded correctly; qed")
 	}
 }
 

@@ -1,41 +1,46 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Primitives for the runtime modules.
 
 use sp_std::prelude::*;
-use sp_std::{self, result, marker::PhantomData, convert::{TryFrom, TryInto}, fmt::Debug};
+use sp_std::{self, marker::PhantomData, convert::{TryFrom, TryInto}, fmt::Debug};
 use sp_io;
 #[cfg(feature = "std")]
 use std::fmt::Display;
 #[cfg(feature = "std")]
+use std::str::FromStr;
+#[cfg(feature = "std")]
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
-use sp_core::{self, Hasher, Blake2Hasher, TypeId, RuntimeDebug};
+use sp_core::{self, Hasher, TypeId, RuntimeDebug};
 use crate::codec::{Codec, Encode, Decode};
 use crate::transaction_validity::{
-	ValidTransaction, TransactionValidity, TransactionValidityError, UnknownTransaction,
+	ValidTransaction, TransactionSource, TransactionValidity, TransactionValidityError,
+	UnknownTransaction,
 };
 use crate::generic::{Digest, DigestItem};
 pub use sp_arithmetic::traits::{
-	SimpleArithmetic, UniqueSaturatedInto, UniqueSaturatedFrom, Saturating, SaturatedConversion,
-	Zero, One, Bounded, CheckedAdd, CheckedSub, CheckedMul, CheckedDiv,
+	AtLeast32Bit, AtLeast32BitUnsigned, UniqueSaturatedInto, UniqueSaturatedFrom, Saturating,
+	SaturatedConversion, Zero, One, Bounded, CheckedAdd, CheckedSub, CheckedMul, CheckedDiv,
 	CheckedShl, CheckedShr, IntegerSquareRoot
 };
 use sp_application_crypto::AppKey;
 use impl_trait_for_tuples::impl_for_tuples;
+use crate::DispatchResult;
 
 /// A lazy value.
 pub trait Lazy<T: ?Sized> {
@@ -77,12 +82,15 @@ impl IdentifyAccount for sp_core::ecdsa::Public {
 pub trait Verify {
 	/// Type of the signer.
 	type Signer: IdentifyAccount;
-	/// Verify a signature. Return `true` if signature is valid for the value.
+	/// Verify a signature.
+	///
+	/// Return `true` if signature is valid for the value.
 	fn verify<L: Lazy<[u8]>>(&self, msg: L, signer: &<Self::Signer as IdentifyAccount>::AccountId) -> bool;
 }
 
 impl Verify for sp_core::ed25519::Signature {
 	type Signer = sp_core::ed25519::Public;
+
 	fn verify<L: Lazy<[u8]>>(&self, mut msg: L, signer: &sp_core::ed25519::Public) -> bool {
 		sp_io::crypto::ed25519_verify(self, msg.get(), signer)
 	}
@@ -90,6 +98,7 @@ impl Verify for sp_core::ed25519::Signature {
 
 impl Verify for sp_core::sr25519::Signature {
 	type Signer = sp_core::sr25519::Public;
+
 	fn verify<L: Lazy<[u8]>>(&self, mut msg: L, signer: &sp_core::sr25519::Public) -> bool {
 		sp_io::crypto::sr25519_verify(self, msg.get(), signer)
 	}
@@ -135,25 +144,13 @@ impl<
 }
 
 /// An error type that indicates that the origin is invalid.
-#[derive(Encode, Decode)]
+#[derive(Encode, Decode, RuntimeDebug)]
 pub struct BadOrigin;
 
 impl From<BadOrigin> for &'static str {
 	fn from(_: BadOrigin) -> &'static str {
 		"Bad origin"
 	}
-}
-
-/// Some sort of check on the origin is performed by this object.
-pub trait EnsureOrigin<OuterOrigin> {
-	/// A return type.
-	type Success;
-	/// Perform the origin check.
-	fn ensure_origin(o: OuterOrigin) -> result::Result<Self::Success, BadOrigin> {
-		Self::try_origin(o).map_err(|_| BadOrigin)
-	}
-	/// Perform the origin check.
-	fn try_origin(o: OuterOrigin) -> result::Result<Self::Success, OuterOrigin>;
 }
 
 /// An error that indicates that a lookup failed.
@@ -327,60 +324,22 @@ impl<T:
 	sp_std::ops::BitAnd<Self, Output = Self>
 > SimpleBitOps for T {}
 
-/// The block finalization trait. Implementing this lets you express what should happen
-/// for your module when the block is ending.
-#[impl_for_tuples(30)]
-pub trait OnFinalize<BlockNumber> {
-	/// The block is being finalized. Implement to have something happen.
-	fn on_finalize(_n: BlockNumber) {}
-}
-
-/// The block initialization trait. Implementing this lets you express what should happen
-/// for your module when the block is beginning (right before the first extrinsic is executed).
-#[impl_for_tuples(30)]
-pub trait OnInitialize<BlockNumber> {
-	/// The block is being initialized. Implement to have something happen.
-	fn on_initialize(_n: BlockNumber) {}
-}
-
-/// Off-chain computation trait.
-///
-/// Implementing this trait on a module allows you to perform long-running tasks
-/// that make (by default) validators generate transactions that feed results
-/// of those long-running computations back on chain.
-///
-/// NOTE: This function runs off-chain, so it can access the block state,
-/// but cannot preform any alterations. More specifically alterations are
-/// not forbidden, but they are not persisted in any way after the worker
-/// has finished.
-#[impl_for_tuples(30)]
-pub trait OffchainWorker<BlockNumber> {
-	/// This function is being called after every block import (when fully synced).
-	///
-	/// Implement this and use any of the `Offchain` `sp_io` set of APIs
-	/// to perform off-chain computations, calls and submit transactions
-	/// with results to trigger any on-chain changes.
-	/// Any state alterations are lost and are not persisted.
-	fn offchain_worker(_n: BlockNumber) {}
-}
-
 /// Abstraction around hashing
 // Stupid bug in the Rust compiler believes derived
 // traits must be fulfilled by all type parameters.
-pub trait Hash: 'static + MaybeSerializeDeserialize + Debug + Clone + Eq + PartialEq {
+pub trait Hash: 'static + MaybeSerializeDeserialize + Debug + Clone + Eq + PartialEq + Hasher<Out = <Self as Hash>::Output> {
 	/// The hash type produced.
 	type Output: Member + MaybeSerializeDeserialize + Debug + sp_std::hash::Hash
 		+ AsRef<[u8]> + AsMut<[u8]> + Copy + Default + Encode + Decode;
 
-	/// The associated hash_db Hasher type.
-	type Hasher: Hasher<Out=Self::Output>;
-
 	/// Produce the hash of some byte-slice.
-	fn hash(s: &[u8]) -> Self::Output;
+	fn hash(s: &[u8]) -> Self::Output {
+		<Self as Hasher>::hash(s)
+	}
 
 	/// Produce the hash of some codec-encodable value.
 	fn hash_of<S: Encode>(s: &S) -> Self::Output {
-		Encode::using_encoded(s, Self::hash)
+		Encode::using_encoded(s, <Self as Hasher>::hash)
 	}
 
 	/// The ordered Patricia tree root of the given `input`.
@@ -395,12 +354,18 @@ pub trait Hash: 'static + MaybeSerializeDeserialize + Debug + Clone + Eq + Parti
 #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub struct BlakeTwo256;
 
-impl Hash for BlakeTwo256 {
-	type Output = sp_core::H256;
-	type Hasher = Blake2Hasher;
-	fn hash(s: &[u8]) -> Self::Output {
+impl Hasher for BlakeTwo256 {
+	type Out = sp_core::H256;
+	type StdHasher = hash256_std_hasher::Hash256StdHasher;
+	const LENGTH: usize = 32;
+
+	fn hash(s: &[u8]) -> Self::Out {
 		sp_io::hashing::blake2_256(s).into()
 	}
+}
+
+impl Hash for BlakeTwo256 {
+	type Output = sp_core::H256;
 
 	fn trie_root(input: Vec<(Vec<u8>, Vec<u8>)>) -> Self::Output {
 		sp_io::trie::blake2_256_root(input)
@@ -408,6 +373,33 @@ impl Hash for BlakeTwo256 {
 
 	fn ordered_trie_root(input: Vec<Vec<u8>>) -> Self::Output {
 		sp_io::trie::blake2_256_ordered_root(input)
+	}
+}
+
+/// Keccak-256 Hash implementation.
+#[derive(PartialEq, Eq, Clone, RuntimeDebug)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+pub struct Keccak256;
+
+impl Hasher for Keccak256 {
+	type Out = sp_core::H256;
+	type StdHasher = hash256_std_hasher::Hash256StdHasher;
+	const LENGTH: usize = 32;
+
+	fn hash(s: &[u8]) -> Self::Out {
+		sp_io::hashing::keccak_256(s).into()
+	}
+}
+
+impl Hash for Keccak256 {
+	type Output = sp_core::H256;
+
+	fn trie_root(input: Vec<(Vec<u8>, Vec<u8>)>) -> Self::Output {
+		sp_io::trie::keccak_256_root(input)
+	}
+
+	fn ordered_trie_root(input: Vec<Vec<u8>>) -> Self::Output {
+		sp_io::trie::keccak_256_ordered_root(input)
 	}
 }
 
@@ -462,6 +454,9 @@ sp_core::impl_maybe_marker!(
 	/// A type that implements Display when in std environment.
 	trait MaybeDisplay: Display;
 
+	/// A type that implements FromStr when in std environment.
+	trait MaybeFromStr: FromStr;
+
 	/// A type that implements Hash when in std environment.
 	trait MaybeHash: sp_std::hash::Hash;
 
@@ -470,23 +465,10 @@ sp_core::impl_maybe_marker!(
 
 	/// A type that implements Serialize, DeserializeOwned and Debug when in std environment.
 	trait MaybeSerializeDeserialize: DeserializeOwned, Serialize;
-);
 
-/// A type that provides a randomness beacon.
-pub trait RandomnessBeacon {
-	/// Returns 32 bytes of random data. The output will change eventually, but
-	/// is not guaranteed to be different between any two calls.
-	///
-	/// # Security
-	///
-	/// This MUST NOT be used for gambling, as it can be influenced by a
-	/// malicious validator in the short term. It MAY be used in many
-	/// cryptographic protocols, however, so long as one remembers that this
-	/// (like everything else on-chain) is public. For example, it can be
-	/// used where a number is needed that cannot have been chosen by an
-	/// adversary, for purposes such as public-coin zero-knowledge proofs.
-	fn random() -> [u8; 32];
-}
+	/// A type that implements MallocSizeOf.
+	trait MaybeMallocSizeOf: parity_util_mem::MallocSizeOf;
+);
 
 /// A type that can be used in runtime structures.
 pub trait Member: Send + Sync + Sized + Debug + Eq + PartialEq + Clone + 'static {}
@@ -503,13 +485,17 @@ pub trait IsMember<MemberId> {
 /// `parent_hash`, as well as a `digest` and a block `number`.
 ///
 /// You can also create a `new` one from those fields.
-pub trait Header: Clone + Send + Sync + Codec + Eq + MaybeSerialize + Debug + 'static {
+pub trait Header:
+	Clone + Send + Sync + Codec + Eq + MaybeSerialize + Debug +
+	MaybeMallocSizeOf + 'static
+{
 	/// Header number.
-	type Number: Member + MaybeSerializeDeserialize + Debug + sp_std::hash::Hash
-		+ Copy + MaybeDisplay + SimpleArithmetic + Codec + sp_std::str::FromStr;
+	type Number: Member + MaybeSerializeDeserialize + Debug + sp_std::hash::Hash + Copy +
+		MaybeDisplay + AtLeast32BitUnsigned + Codec + sp_std::str::FromStr + MaybeMallocSizeOf;
 	/// Header hash type
 	type Hash: Member + MaybeSerializeDeserialize + Debug + sp_std::hash::Hash + Ord
-		+ Copy + MaybeDisplay + Default + SimpleBitOps + Codec + AsRef<[u8]> + AsMut<[u8]>;
+		+ Copy + MaybeDisplay + Default + SimpleBitOps + Codec + AsRef<[u8]>
+		+ AsMut<[u8]> + MaybeMallocSizeOf;
 	/// Hashing algorithm
 	type Hashing: Hash<Output = Self::Hash>;
 
@@ -557,14 +543,15 @@ pub trait Header: Clone + Send + Sync + Codec + Eq + MaybeSerialize + Debug + 's
 /// `Extrinsic` pieces of information as well as a `Header`.
 ///
 /// You can get an iterator over each of the `extrinsics` and retrieve the `header`.
-pub trait Block: Clone + Send + Sync + Codec + Eq + MaybeSerialize + Debug + 'static {
+pub trait Block: Clone + Send + Sync + Codec + Eq + MaybeSerialize + Debug + MaybeMallocSizeOf + 'static {
 	/// Type for extrinsics.
-	type Extrinsic: Member + Codec + Extrinsic + MaybeSerialize;
+	type Extrinsic: Member + Codec + Extrinsic + MaybeSerialize + MaybeMallocSizeOf;
 	/// Header type.
-	type Header: Header<Hash=Self::Hash>;
+	type Header: Header<Hash=Self::Hash> + MaybeMallocSizeOf;
 	/// Block hash type.
 	type Hash: Member + MaybeSerializeDeserialize + Debug + sp_std::hash::Hash + Ord
-		+ Copy + MaybeDisplay + Default + SimpleBitOps + Codec + AsRef<[u8]> + AsMut<[u8]>;
+		+ Copy + MaybeDisplay + Default + SimpleBitOps + Codec + AsRef<[u8]> + AsMut<[u8]>
+		+ MaybeMallocSizeOf;
 
 	/// Returns a reference to the header.
 	fn header(&self) -> &Self::Header;
@@ -583,8 +570,9 @@ pub trait Block: Clone + Send + Sync + Codec + Eq + MaybeSerialize + Debug + 'st
 	fn encode_from(header: &Self::Header, extrinsics: &[Self::Extrinsic]) -> Vec<u8>;
 }
 
+
 /// Something that acts like an `Extrinsic`.
-pub trait Extrinsic: Sized {
+pub trait Extrinsic: Sized + MaybeMallocSizeOf {
 	/// The function call.
 	type Call;
 
@@ -608,8 +596,15 @@ pub trait Extrinsic: Sized {
 	fn new(_call: Self::Call, _signed_data: Option<Self::SignaturePayload>) -> Option<Self> { None }
 }
 
-/// Extract the hasher type for a block.
-pub type HasherFor<B> = <HashFor<B> as Hash>::Hasher;
+/// Implementor is an [`Extrinsic`] and provides metadata about this extrinsic.
+pub trait ExtrinsicMetadata {
+	/// The version of the `Extrinsic`.
+	const VERSION: u8;
+
+	/// Signed extensions attached to this `Extrinsic`.
+	type SignedExtensions: SignedExtension;
+}
+
 /// Extract the hashing type for a block.
 pub type HashFor<B> = <<B as Block>::Header as Header>::Hashing;
 /// Extract the number type for a block.
@@ -661,18 +656,46 @@ pub trait Dispatchable {
 	type Origin;
 	/// ...
 	type Trait;
-	/// Actually dispatch this call and result the result of it.
-	fn dispatch(self, origin: Self::Origin) -> crate::DispatchResult;
+	/// An opaque set of information attached to the transaction. This could be constructed anywhere
+	/// down the line in a runtime. The current Substrate runtime uses a struct with the same name
+	/// to represent the dispatch class and weight.
+	type Info;
+	/// Additional information that is returned by `dispatch`. Can be used to supply the caller
+	/// with information about a `Dispatchable` that is ownly known post dispatch.
+	type PostInfo: Eq + PartialEq + Clone + Copy + Encode + Decode + Printable;
+	/// Actually dispatch this call and return the result of it.
+	fn dispatch(self, origin: Self::Origin) -> crate::DispatchResultWithInfo<Self::PostInfo>;
+}
+
+/// Shortcut to reference the `Info` type of a `Dispatchable`.
+pub type DispatchInfoOf<T> = <T as Dispatchable>::Info;
+/// Shortcut to reference the `PostInfo` type of a `Dispatchable`.
+pub type PostDispatchInfoOf<T> = <T as Dispatchable>::PostInfo;
+
+impl Dispatchable for () {
+	type Origin = ();
+	type Trait = ();
+	type Info = ();
+	type PostInfo = ();
+	fn dispatch(self, _origin: Self::Origin) -> crate::DispatchResultWithInfo<Self::PostInfo> {
+		panic!("This implemention should not be used for actual dispatch.");
+	}
 }
 
 /// Means by which a transaction may be extended. This type embodies both the data and the logic
 /// that should be additionally associated with the transaction. It should be plain old data.
 pub trait SignedExtension: Codec + Debug + Sync + Send + Clone + Eq + PartialEq {
+	/// Unique identifier of this signed extension.
+	///
+	/// This will be exposed in the metadata to identify the signed extension used
+	/// in an extrinsic.
+	const IDENTIFIER: &'static str;
+
 	/// The type which encodes the sender identity.
 	type AccountId;
 
 	/// The type which encodes the call to be dispatched.
-	type Call;
+	type Call: Dispatchable;
 
 	/// Any additional data that will go into the signed payload. This may be created dynamically
 	/// from the transaction using the `additional_signed` function.
@@ -680,11 +703,6 @@ pub trait SignedExtension: Codec + Debug + Sync + Send + Clone + Eq + PartialEq 
 
 	/// The type that encodes information that can be passed from pre_dispatch to post-dispatch.
 	type Pre: Default;
-
-	/// An opaque set of information attached to the transaction. This could be constructed anywhere
-	/// down the line in a runtime. The current Substrate runtime uses a struct with the same name
-	/// to represent the dispatch class and weight.
-	type DispatchInfo: Clone;
 
 	/// Construct any additional data that should be in the signed payload of the transaction. Can
 	/// also perform any pre-signature-verification checks and return an error if needed.
@@ -703,7 +721,7 @@ pub trait SignedExtension: Codec + Debug + Sync + Send + Clone + Eq + PartialEq 
 		&self,
 		_who: &Self::AccountId,
 		_call: &Self::Call,
-		_info: Self::DispatchInfo,
+		_info: &DispatchInfoOf<Self::Call>,
 		_len: usize,
 	) -> TransactionValidity {
 		Ok(ValidTransaction::default())
@@ -721,10 +739,10 @@ pub trait SignedExtension: Codec + Debug + Sync + Send + Clone + Eq + PartialEq 
 		self,
 		who: &Self::AccountId,
 		call: &Self::Call,
-		info: Self::DispatchInfo,
+		info: &DispatchInfoOf<Self::Call>,
 		len: usize,
 	) -> Result<Self::Pre, TransactionValidityError> {
-		self.validate(who, call, info.clone(), len)
+		self.validate(who, call, info, len)
 			.map(|_| Self::Pre::default())
 			.map_err(Into::into)
 	}
@@ -739,7 +757,7 @@ pub trait SignedExtension: Codec + Debug + Sync + Send + Clone + Eq + PartialEq 
 	/// Make sure to perform the same checks in `pre_dispatch_unsigned` function.
 	fn validate_unsigned(
 		_call: &Self::Call,
-		_info: Self::DispatchInfo,
+		_info: &DispatchInfoOf<Self::Call>,
 		_len: usize,
 	) -> TransactionValidity {
 		Ok(ValidTransaction::default())
@@ -755,24 +773,55 @@ pub trait SignedExtension: Codec + Debug + Sync + Send + Clone + Eq + PartialEq 
 	/// perform the same validation as in `validate_unsigned`.
 	fn pre_dispatch_unsigned(
 		call: &Self::Call,
-		info: Self::DispatchInfo,
+		info: &DispatchInfoOf<Self::Call>,
 		len: usize,
 	) -> Result<Self::Pre, TransactionValidityError> {
-		Self::validate_unsigned(call, info.clone(), len)
+		Self::validate_unsigned(call, info, len)
 			.map(|_| Self::Pre::default())
 			.map_err(Into::into)
 	}
 
-	/// Do any post-flight stuff for a transaction.
-	fn post_dispatch(_pre: Self::Pre, _info: Self::DispatchInfo, _len: usize) { }
+	/// Do any post-flight stuff for an extrinsic.
+	///
+	/// This gets given the `DispatchResult` `_result` from the extrinsic and can, if desired,
+	/// introduce a `TransactionValidityError`, causing the block to become invalid for including
+	/// it.
+	///
+	/// WARNING: It is dangerous to return an error here. To do so will fundamentally invalidate the
+	/// transaction and any block that it is included in, causing the block author to not be
+	/// compensated for their work in validating the transaction or producing the block so far.
+	///
+	/// It can only be used safely when you *know* that the extrinsic is one that can only be
+	/// introduced by the current block author; generally this implies that it is an inherent and
+	/// will come from either an offchain-worker or via `InherentData`.
+	fn post_dispatch(
+		_pre: Self::Pre,
+		_info: &DispatchInfoOf<Self::Call>,
+		_post_info: &PostDispatchInfoOf<Self::Call>,
+		_len: usize,
+		_result: &DispatchResult,
+	) -> Result<(), TransactionValidityError> {
+		Ok(())
+	}
+
+	/// Returns the list of unique identifier for this signed extension.
+	///
+	/// As a [`SignedExtension`] can be a tuple of [`SignedExtension`]s we need to return a `Vec`
+	/// that holds all the unique identifiers. Each individual `SignedExtension` must return
+	/// *exactly* one identifier.
+	///
+	/// This method provides a default implementation that returns `vec![SELF::IDENTIFIER]`.
+	fn identifier() -> Vec<&'static str> {
+		sp_std::vec![Self::IDENTIFIER]
+	}
 }
 
 #[impl_for_tuples(1, 12)]
-impl<AccountId, Call, Info: Clone> SignedExtension for Tuple {
-	for_tuples!( where #( Tuple: SignedExtension<AccountId=AccountId, Call=Call, DispatchInfo=Info> )* );
+impl<AccountId, Call: Dispatchable> SignedExtension for Tuple {
+	for_tuples!( where #( Tuple: SignedExtension<AccountId=AccountId, Call=Call,> )* );
 	type AccountId = AccountId;
 	type Call = Call;
-	type DispatchInfo = Info;
+	const IDENTIFIER: &'static str = "You should call `identifier()`!";
 	for_tuples!( type AdditionalSigned = ( #( Tuple::AdditionalSigned ),* ); );
 	for_tuples!( type Pre = ( #( Tuple::Pre ),* ); );
 
@@ -784,44 +833,53 @@ impl<AccountId, Call, Info: Clone> SignedExtension for Tuple {
 		&self,
 		who: &Self::AccountId,
 		call: &Self::Call,
-		info: Self::DispatchInfo,
+		info: &DispatchInfoOf<Self::Call>,
 		len: usize,
 	) -> TransactionValidity {
 		let valid = ValidTransaction::default();
-		for_tuples!( #( let valid = valid.combine_with(Tuple.validate(who, call, info.clone(), len)?); )* );
+		for_tuples!( #( let valid = valid.combine_with(Tuple.validate(who, call, info, len)?); )* );
 		Ok(valid)
 	}
 
-	fn pre_dispatch(self, who: &Self::AccountId, call: &Self::Call, info: Self::DispatchInfo, len: usize)
+	fn pre_dispatch(self, who: &Self::AccountId, call: &Self::Call, info: &DispatchInfoOf<Self::Call>, len: usize)
 		-> Result<Self::Pre, TransactionValidityError>
 	{
-		Ok(for_tuples!( ( #( Tuple.pre_dispatch(who, call, info.clone(), len)? ),* ) ))
+		Ok(for_tuples!( ( #( Tuple.pre_dispatch(who, call, info, len)? ),* ) ))
 	}
 
 	fn validate_unsigned(
 		call: &Self::Call,
-		info: Self::DispatchInfo,
+		info: &DispatchInfoOf<Self::Call>,
 		len: usize,
 	) -> TransactionValidity {
 		let valid = ValidTransaction::default();
-		for_tuples!( #( let valid = valid.combine_with(Tuple::validate_unsigned(call, info.clone(), len)?); )* );
+		for_tuples!( #( let valid = valid.combine_with(Tuple::validate_unsigned(call, info, len)?); )* );
 		Ok(valid)
 	}
 
 	fn pre_dispatch_unsigned(
 		call: &Self::Call,
-		info: Self::DispatchInfo,
+		info: &DispatchInfoOf<Self::Call>,
 		len: usize,
 	) -> Result<Self::Pre, TransactionValidityError> {
-		Ok(for_tuples!( ( #( Tuple::pre_dispatch_unsigned(call, info.clone(), len)? ),* ) ))
+		Ok(for_tuples!( ( #( Tuple::pre_dispatch_unsigned(call, info, len)? ),* ) ))
 	}
 
 	fn post_dispatch(
 		pre: Self::Pre,
-		info: Self::DispatchInfo,
+		info: &DispatchInfoOf<Self::Call>,
+		post_info: &PostDispatchInfoOf<Self::Call>,
 		len: usize,
-	) {
-		for_tuples!( #( Tuple::post_dispatch(pre.Tuple, info.clone(), len); )* )
+		result: &DispatchResult,
+	) -> Result<(), TransactionValidityError> {
+		for_tuples!( #( Tuple::post_dispatch(pre.Tuple, info, post_info, len, result)?; )* );
+		Ok(())
+	}
+
+	fn identifier() -> Vec<&'static str> {
+		let mut ids = Vec::new();
+		for_tuples!( #( ids.extend(Tuple::identifier()); )* );
+		ids
 	}
 }
 
@@ -832,7 +890,7 @@ impl SignedExtension for () {
 	type AdditionalSigned = ();
 	type Call = ();
 	type Pre = ();
-	type DispatchInfo = ();
+	const IDENTIFIER: &'static str = "UnitSignedExtension";
 	fn additional_signed(&self) -> sp_std::result::Result<(), TransactionValidityError> { Ok(()) }
 }
 
@@ -843,34 +901,24 @@ impl SignedExtension for () {
 /// Also provides information on to whom this information is attributable and an index that allows
 /// each piece of attributable information to be disambiguated.
 pub trait Applyable: Sized + Send + Sync {
-	/// ID of the account that is responsible for this piece of information (sender).
-	type AccountId: Member + MaybeDisplay;
-
 	/// Type by which we can dispatch. Restricts the `UnsignedValidator` type.
-	type Call;
-
-	/// An opaque set of information attached to the transaction.
-	type DispatchInfo: Clone;
-
-	/// Returns a reference to the sender if any.
-	fn sender(&self) -> Option<&Self::AccountId>;
+	type Call: Dispatchable;
 
 	/// Checks to see if this is a valid *transaction*. It returns information on it if so.
-	#[allow(deprecated)] // Allow ValidateUnsigned
 	fn validate<V: ValidateUnsigned<Call=Self::Call>>(
 		&self,
-		info: Self::DispatchInfo,
+		source: TransactionSource,
+		info: &DispatchInfoOf<Self::Call>,
 		len: usize,
 	) -> TransactionValidity;
 
 	/// Executes all necessary logic needed prior to dispatch and deconstructs into function call,
 	/// index and sender.
-	#[allow(deprecated)] // Allow ValidateUnsigned
 	fn apply<V: ValidateUnsigned<Call=Self::Call>>(
 		self,
-		info: Self::DispatchInfo,
+		info: &DispatchInfoOf<Self::Call>,
 		len: usize,
-	) -> crate::ApplyExtrinsicResult;
+	) -> crate::ApplyExtrinsicResultWithInfo<PostDispatchInfoOf<Self::Call>>;
 }
 
 /// A marker trait for something that knows the type of the runtime block.
@@ -891,7 +939,6 @@ pub trait GetNodeBlockType {
 /// the transaction for the transaction pool.
 /// During block execution phase one need to perform the same checks anyway,
 /// since this function is not being called.
-#[deprecated(note = "Use SignedExtensions instead.")]
 pub trait ValidateUnsigned {
 	/// The call to validate
 	type Call;
@@ -907,7 +954,7 @@ pub trait ValidateUnsigned {
 	///
 	/// Changes made to storage WILL be persisted if the call returns `Ok`.
 	fn pre_dispatch(call: &Self::Call) -> Result<(), TransactionValidityError> {
-		Self::validate_unsigned(call)
+		Self::validate_unsigned(TransactionSource::InBlock, call)
 			.map(|_| ())
 			.map_err(Into::into)
 	}
@@ -918,10 +965,10 @@ pub trait ValidateUnsigned {
 	/// whether the transaction would panic if it were included or not.
 	///
 	/// Changes made to storage should be discarded by caller.
-	fn validate_unsigned(call: &Self::Call) -> TransactionValidity;
+	fn validate_unsigned(source: TransactionSource, call: &Self::Call) -> TransactionValidity;
 }
 
-/// Opaque datatype that may be destructured into a series of raw byte slices (which represent
+/// Opaque data type that may be destructured into a series of raw byte slices (which represent
 /// individual keys).
 pub trait OpaqueKeys: Clone {
 	/// Types bound to this opaque keys that provide the key type ids returned.
@@ -931,7 +978,7 @@ pub trait OpaqueKeys: Clone {
 	fn key_ids() -> &'static [crate::KeyTypeId];
 	/// Get the raw bytes of key with key-type ID `i`.
 	fn get_raw(&self, i: super::KeyTypeId) -> &[u8];
-	/// Get the decoded key with index `i`.
+	/// Get the decoded key with key-type ID `i`.
 	fn get<T: Decode>(&self, i: super::KeyTypeId) -> Option<T> {
 		T::decode(&mut self.get_raw(i)).ok()
 	}
@@ -1109,6 +1156,7 @@ macro_rules! impl_opaque_keys {
 		$( #[ $attr:meta ] )*
 		pub struct $name:ident {
 			$(
+				$( #[ $inner_attr:meta ] )*
 				pub $field:ident: $type:ty,
 			)*
 		}
@@ -1123,6 +1171,7 @@ macro_rules! impl_opaque_keys {
 		#[cfg_attr(feature = "std", derive($crate::serde::Serialize, $crate::serde::Deserialize))]
 		pub struct $name {
 			$(
+				$( #[ $inner_attr ] )*
 				pub $field: <$type as $crate::BoundToRuntimeAppPublic>::Public,
 			)*
 		}
@@ -1216,6 +1265,12 @@ pub trait Printable {
 	fn print(&self);
 }
 
+impl<T: Printable> Printable for &T {
+	fn print(&self) {
+		(*self).print()
+	}
+}
+
 impl Printable for u8 {
 	fn print(&self) {
 		(*self as u64).print()
@@ -1252,6 +1307,22 @@ impl Printable for &str {
 	}
 }
 
+impl Printable for bool {
+	fn print(&self) {
+		if *self {
+			"true".print()
+		} else {
+			"false".print()
+		}
+	}
+}
+
+impl Printable for () {
+	fn print(&self) {
+		"()".print()
+	}
+}
+
 #[impl_for_tuples(1, 12)]
 impl Printable for Tuple {
 	fn print(&self) {
@@ -1259,7 +1330,7 @@ impl Printable for Tuple {
 	}
 }
 
-/// Something that can convert a [`BlockId`] to a number or a hash.
+/// Something that can convert a [`BlockId`](crate::generic::BlockId) to a number or a hash.
 #[cfg(feature = "std")]
 pub trait BlockIdTo<Block: self::Block> {
 	/// The error type that will be returned by the functions.

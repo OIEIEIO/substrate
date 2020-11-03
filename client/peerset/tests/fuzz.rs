@@ -1,18 +1,20 @@
-// Copyright 2018-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use futures::prelude::*;
 use libp2p::PeerId;
@@ -43,12 +45,15 @@ fn test_once() {
 			known_nodes.insert(id.clone());
 			id
 		}).collect(),
-		reserved_nodes: (0 .. Uniform::new_inclusive(0, 2).sample(&mut rng)).map(|_| {
-			let id = PeerId::random();
-			known_nodes.insert(id.clone());
-			reserved_nodes.insert(id.clone());
-			id
-		}).collect(),
+		priority_groups: {
+			let nodes = (0 .. Uniform::new_inclusive(0, 2).sample(&mut rng)).map(|_| {
+				let id = PeerId::random();
+				known_nodes.insert(id.clone());
+				reserved_nodes.insert(id.clone());
+				id
+			}).collect();
+			vec![("foo".to_string(), nodes)]
+		},
 		reserved_only: Uniform::new_inclusive(0, 10).sample(&mut rng) == 0,
 		in_peers: Uniform::new_inclusive(0, 25).sample(&mut rng),
 		out_peers: Uniform::new_inclusive(0, 25).sample(&mut rng),
@@ -108,7 +113,7 @@ fn test_once() {
 
 				// If we generate 4, connect to a random node.
 				4 => if let Some(id) = known_nodes.iter()
-					.filter(|n| incoming_nodes.values().all(|m| m != *n) && !connected_nodes.contains(n))
+					.filter(|n| incoming_nodes.values().all(|m| m != *n) && !connected_nodes.contains(*n))
 					.choose(&mut rng) {
 					peerset.incoming(id.clone(), next_incoming_id.clone());
 					incoming_nodes.insert(next_incoming_id.clone(), id.clone());
@@ -120,7 +125,7 @@ fn test_once() {
 				6 => peerset_handle.set_reserved_only(false),
 
 				// 7 and 8 are about switching a random node in or out of reserved mode.
-				7 => if let Some(id) = known_nodes.iter().filter(|n| !reserved_nodes.contains(n)).choose(&mut rng) {
+				7 => if let Some(id) = known_nodes.iter().filter(|n| !reserved_nodes.contains(*n)).choose(&mut rng) {
 					peerset_handle.add_reserved_peer(id.clone());
 					reserved_nodes.insert(id.clone());
 				}

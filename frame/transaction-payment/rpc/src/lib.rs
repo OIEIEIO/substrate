@@ -1,18 +1,19 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! RPC interface for the transaction payment module.
 
@@ -21,21 +22,21 @@ use codec::{Codec, Decode};
 use sp_blockchain::HeaderBackend;
 use jsonrpc_core::{Error as RpcError, ErrorCode, Result};
 use jsonrpc_derive::rpc;
-use sp_runtime::{generic::BlockId, traits::{Block as BlockT, UniqueSaturatedInto}};
+use sp_runtime::{generic::BlockId, traits::{Block as BlockT, MaybeDisplay, MaybeFromStr}};
 use sp_api::ProvideRuntimeApi;
 use sp_core::Bytes;
-use pallet_transaction_payment_rpc_runtime_api::CappedDispatchInfo;
+use pallet_transaction_payment_rpc_runtime_api::RuntimeDispatchInfo;
 pub use pallet_transaction_payment_rpc_runtime_api::TransactionPaymentApi as TransactionPaymentRuntimeApi;
 pub use self::gen_client::Client as TransactionPaymentClient;
 
 #[rpc]
-pub trait TransactionPaymentApi<BlockHash, Balance> {
+pub trait TransactionPaymentApi<BlockHash, ResponseType> {
 	#[rpc(name = "payment_queryInfo")]
 	fn query_info(
 		&self,
 		encoded_xt: Bytes,
 		at: Option<BlockHash>
-	) -> Result<CappedDispatchInfo>;
+	) -> Result<ResponseType>;
 }
 
 /// A struct that implements the [`TransactionPaymentApi`].
@@ -68,20 +69,19 @@ impl From<Error> for i64 {
 	}
 }
 
-impl<C, Block, Balance, Extrinsic> TransactionPaymentApi<<Block as BlockT>::Hash, Balance>
-	for TransactionPayment<C, (Block, Extrinsic)>
+impl<C, Block, Balance> TransactionPaymentApi<<Block as BlockT>::Hash, RuntimeDispatchInfo<Balance>>
+	for TransactionPayment<C, Block>
 where
 	Block: BlockT,
 	C: Send + Sync + 'static + ProvideRuntimeApi<Block> + HeaderBackend<Block>,
-	C::Api: TransactionPaymentRuntimeApi<Block, Balance, Extrinsic>,
-	Balance: Codec + UniqueSaturatedInto<u64>,
-	Extrinsic: Codec + Send + Sync + 'static,
+	C::Api: TransactionPaymentRuntimeApi<Block, Balance>,
+	Balance: Codec + MaybeDisplay + MaybeFromStr,
 {
 	fn query_info(
 		&self,
 		encoded_xt: Bytes,
 		at: Option<<Block as BlockT>::Hash>
-	) -> Result<CappedDispatchInfo> {
+	) -> Result<RuntimeDispatchInfo<Balance>> {
 		let api = self.client.runtime_api();
 		let at = BlockId::hash(at.unwrap_or_else(||
 			// If the block hash is not supplied assume the best block.
@@ -90,7 +90,7 @@ where
 
 		let encoded_len = encoded_xt.len() as u32;
 
-		let uxt: Extrinsic = Decode::decode(&mut &*encoded_xt).map_err(|e| RpcError {
+		let uxt: Block::Extrinsic = Decode::decode(&mut &*encoded_xt).map_err(|e| RpcError {
 			code: ErrorCode::ServerError(Error::DecodeError.into()),
 			message: "Unable to query dispatch info.".into(),
 			data: Some(format!("{:?}", e).into()),
@@ -99,6 +99,6 @@ where
 			code: ErrorCode::ServerError(Error::RuntimeError.into()),
 			message: "Unable to query dispatch info.".into(),
 			data: Some(format!("{:?}", e).into()),
-		}).map(CappedDispatchInfo::new)
+		})
 	}
 }

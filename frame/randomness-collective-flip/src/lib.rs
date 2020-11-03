@@ -1,25 +1,27 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! # Randomness Module
 //!
 //! The Randomness Collective Flip module provides a [`random`](./struct.Module.html#method.random)
 //! function that generates low-influence random values based on the block hashes from the previous
 //! `81` blocks. Low-influence randomness can be useful when defending against relatively weak
-//! adversaries.
+//! adversaries. Using this pallet as a randomness source is advisable primarily in low-security
+//! situations like testing.
 //!
 //! ## Public Functions
 //!
@@ -41,8 +43,9 @@
 //!
 //! decl_module! {
 //! 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+//! 		#[weight = 0]
 //! 		pub fn random_module_example(origin) -> dispatch::DispatchResult {
-//! 			let _random_seed = <pallet_randomness_collective_flip::Module<T>>::random_seed();
+//! 			let _random_value = <pallet_randomness_collective_flip::Module<T>>::random(&b"my context"[..]);
 //! 			Ok(())
 //! 		}
 //! 	}
@@ -54,7 +57,10 @@
 
 use sp_std::{prelude::*, convert::TryInto};
 use sp_runtime::traits::Hash;
-use frame_support::{decl_module, decl_storage, traits::Randomness};
+use frame_support::{
+	decl_module, decl_storage, traits::Randomness,
+	weights::Weight
+};
 use safe_mix::TripletMix;
 use codec::Encode;
 use frame_system::Trait;
@@ -63,13 +69,13 @@ const RANDOM_MATERIAL_LEN: u32 = 81;
 
 fn block_number_to_index<T: Trait>(block_number: T::BlockNumber) -> usize {
 	// on_initialize is called on the first block after genesis
-	let index = (block_number - 1.into()) % RANDOM_MATERIAL_LEN.into();
+	let index = (block_number - 1u32.into()) % RANDOM_MATERIAL_LEN.into();
 	index.try_into().ok().expect("Something % 81 is always smaller than usize; qed")
 }
 
 decl_module! {
 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
-		fn on_initialize(block_number: T::BlockNumber) {
+		fn on_initialize(block_number: T::BlockNumber) -> Weight {
 			let parent_hash = <frame_system::Module<T>>::parent_hash();
 
 			<RandomMaterial<T>>::mutate(|ref mut values| if values.len() < RANDOM_MATERIAL_LEN as usize {
@@ -78,6 +84,8 @@ decl_module! {
 				let index = block_number_to_index::<T>(block_number);
 				values[index] = parent_hash;
 			});
+
+			0
 		}
 	}
 }
@@ -92,39 +100,12 @@ decl_storage! {
 }
 
 impl<T: Trait> Randomness<T::Hash> for Module<T> {
-	/// Get a low-influence "random" value.
-	///
-	/// Being a deterministic block chain, real randomness is difficult to come by. This gives you
-	/// something that approximates it. `subject` is a context identifier and allows you to get a
-	/// different result to other callers of this function; use it like
-	/// `random(&b"my context"[..])`. This is initially implemented through a low-influence
-	/// "triplet mix" convolution of previous block hash values. In the future it will be generated
-	/// from a secure verifiable random function (VRF).
-	///
-	/// ### Security Notes
-	///
 	/// This randomness uses a low-influence function, drawing upon the block hashes from the
 	/// previous 81 blocks. Its result for any given subject will be known far in advance by anyone
 	/// observing the chain. Any block producer has significant influence over their block hashes
 	/// bounded only by their computational resources. Our low-influence function reduces the actual
 	/// block producer's influence over the randomness, but increases the influence of small
 	/// colluding groups of recent block producers.
-	///
-	/// Some BABE blocks have VRF outputs where the block producer has exactly one bit of influence,
-	/// either they make the block or they do not make the block and thus someone else makes the
-	/// next block. Yet, this randomness is not fresh in all BABE blocks.
-	///
-	/// If that is an insufficient security guarantee then two things can be used to improve this
-	/// randomness:
-	///
-	/// - Name, in advance, the block number whose random value will be used; ensure your module
-	///   retains a buffer of previous random values for its subject and then index into these in
-	///   order to obviate the ability of your user to look up the parent hash and choose when to
-	///   transact based upon it.
-	/// - Require your user to first commit to an additional value by first posting its hash.
-	///   Require them to reveal the value to determine the final result, hashing it with the
-	///   output of this random function. This reduces the ability of a cabal of block producers
-	///   from conspiring against individuals.
 	///
 	/// WARNING: Hashing the result of this function will remove any low-influence properties it has
 	/// and mean that all bits of the resulting value are entirely manipulatable by the author of
@@ -135,7 +116,7 @@ impl<T: Trait> Randomness<T::Hash> for Module<T> {
 
 		let hash_series = <RandomMaterial<T>>::get();
 		if !hash_series.is_empty() {
-			// Always the case after block 1 is initialised.
+			// Always the case after block 1 is initialized.
 			hash_series.iter()
 				.cycle()
 				.skip(index)
@@ -154,15 +135,19 @@ mod tests {
 	use super::*;
 	use sp_core::H256;
 	use sp_runtime::{
-		Perbill, traits::{BlakeTwo256, OnInitialize, Header as _, IdentityLookup}, testing::Header,
+		Perbill,
+		testing::Header,
+		traits::{BlakeTwo256, Header as _, IdentityLookup},
 	};
-	use frame_support::{impl_outer_origin, parameter_types, weights::Weight, traits::Randomness};
+	use frame_support::{
+		impl_outer_origin, parameter_types, weights::Weight, traits::{Randomness, OnInitialize},
+	};
 
 	#[derive(Clone, PartialEq, Eq)]
 	pub struct Test;
 
 	impl_outer_origin! {
-		pub enum Origin for Test  where system = frame_system {}
+		pub enum Origin for Test where system = frame_system {}
 	}
 
 	parameter_types! {
@@ -173,6 +158,7 @@ mod tests {
 	}
 
 	impl frame_system::Trait for Test {
+		type BaseCallFilter = ();
 		type Origin = Origin;
 		type Index = u64;
 		type BlockNumber = u64;
@@ -185,10 +171,18 @@ mod tests {
 		type Event = ();
 		type BlockHashCount = BlockHashCount;
 		type MaximumBlockWeight = MaximumBlockWeight;
+		type DbWeight = ();
+		type BlockExecutionWeight = ();
+		type ExtrinsicBaseWeight = ();
+		type MaximumExtrinsicWeight = MaximumBlockWeight;
 		type AvailableBlockRatio = AvailableBlockRatio;
 		type MaximumBlockLength = MaximumBlockLength;
 		type Version = ();
-		type ModuleToIndex = ();
+		type PalletInfo = ();
+		type AccountData = ();
+		type OnNewAccount = ();
+		type OnKilledAccount = ();
+		type SystemWeightInfo = ();
 	}
 
 	type System = frame_system::Module<Test>;
@@ -226,7 +220,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_random_material_parital() {
+	fn test_random_material_partial() {
 		new_test_ext().execute_with(|| {
 			let genesis_hash = System::parent_hash();
 

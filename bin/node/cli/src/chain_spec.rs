@@ -1,18 +1,20 @@
-// Copyright 2018-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Substrate chain configurations.
 
@@ -20,13 +22,14 @@ use sc_chain_spec::ChainSpecExtension;
 use sp_core::{Pair, Public, crypto::UncheckedInto, sr25519};
 use serde::{Serialize, Deserialize};
 use node_runtime::{
-	AuthorityDiscoveryConfig, BabeConfig, BalancesConfig, ContractsConfig, CouncilConfig, DemocracyConfig,
-	GrandpaConfig, ImOnlineConfig, IndicesConfig, SessionConfig, SessionKeys, StakerStatus, StakingConfig,
-	SocietyConfig, SudoConfig, SystemConfig, TechnicalCommitteeConfig, WASM_BINARY,
+	AuthorityDiscoveryConfig, BabeConfig, BalancesConfig, ContractsConfig, CouncilConfig,
+	DemocracyConfig,GrandpaConfig, ImOnlineConfig, SessionConfig, SessionKeys, StakerStatus,
+	StakingConfig, ElectionsConfig, IndicesConfig, SocietyConfig, SudoConfig, SystemConfig,
+	TechnicalCommitteeConfig, wasm_binary_unwrap,
 };
 use node_runtime::Block;
 use node_runtime::constants::currency::*;
-use sc_service;
+use sc_service::ChainType;
 use hex_literal::hex;
 use sc_telemetry::TelemetryEndpoints;
 use grandpa_primitives::{AuthorityId as GrandpaId};
@@ -50,13 +53,13 @@ const STAGING_TELEMETRY_URL: &str = "wss://telemetry.polkadot.io/submit/";
 #[serde(rename_all = "camelCase")]
 pub struct Extensions {
 	/// Block numbers with known hashes.
-	pub fork_blocks: sc_client::ForkBlocks<Block>,
+	pub fork_blocks: sc_client_api::ForkBlocks<Block>,
 	/// Known bad block hashes.
-	pub bad_blocks: sc_client::BadBlocks<Block>,
+	pub bad_blocks: sc_client_api::BadBlocks<Block>,
 }
 
 /// Specialized `ChainSpec`.
-pub type ChainSpec = sc_service::ChainSpec<
+pub type ChainSpec = sc_service::GenericChainSpec<
 	GenesisConfig,
 	Extensions,
 >;
@@ -157,9 +160,11 @@ pub fn staging_testnet_config() -> ChainSpec {
 	ChainSpec::from_genesis(
 		"Staging Testnet",
 		"staging_testnet",
+		ChainType::Live,
 		staging_testnet_config_genesis,
 		boot_nodes,
-		Some(TelemetryEndpoints::new(vec![(STAGING_TELEMETRY_URL.to_string(), 0)])),
+		Some(TelemetryEndpoints::new(vec![(STAGING_TELEMETRY_URL.to_string(), 0)])
+			.expect("Staging telemetry url is valid; qed")),
 		None,
 		None,
 		Default::default(),
@@ -181,7 +186,7 @@ pub fn get_account_id_from_seed<TPublic: Public>(seed: &str) -> AccountId where
 }
 
 /// Helper function to generate stash, controller and session key from seed
-pub fn get_authority_keys_from_seed(seed: &str) -> (
+pub fn authority_keys_from_seed(seed: &str) -> (
 	AccountId,
 	AccountId,
 	GrandpaId,
@@ -201,7 +206,14 @@ pub fn get_authority_keys_from_seed(seed: &str) -> (
 
 /// Helper function to create GenesisConfig for testing
 pub fn testnet_genesis(
-	initial_authorities: Vec<(AccountId, AccountId, GrandpaId, BabeId, ImOnlineId, AuthorityDiscoveryId)>,
+	initial_authorities: Vec<(
+		AccountId,
+		AccountId,
+		GrandpaId,
+		BabeId,
+		ImOnlineId,
+		AuthorityDiscoveryId,
+	)>,
 	root_key: AccountId,
 	endowed_accounts: Option<Vec<AccountId>>,
 	enable_println: bool,
@@ -229,7 +241,7 @@ pub fn testnet_genesis(
 
 	GenesisConfig {
 		frame_system: Some(SystemConfig {
-			code: WASM_BINARY.to_vec(),
+			code: wasm_binary_unwrap().to_vec(),
 			changes_trie_config: Default::default(),
 		}),
 		pallet_balances: Some(BalancesConfig {
@@ -237,20 +249,21 @@ pub fn testnet_genesis(
 				.map(|k| (k, ENDOWMENT))
 				.chain(initial_authorities.iter().map(|x| (x.0.clone(), STASH)))
 				.collect(),
-			vesting: vec![],
 		}),
 		pallet_indices: Some(IndicesConfig {
-			ids: endowed_accounts.iter().cloned()
-				.chain(initial_authorities.iter().map(|x| x.0.clone()))
-				.collect::<Vec<_>>(),
+			indices: vec![],
 		}),
 		pallet_session: Some(SessionConfig {
 			keys: initial_authorities.iter().map(|x| {
-				(x.0.clone(), session_keys(x.2.clone(), x.3.clone(), x.4.clone(), x.5.clone()))
+				(x.0.clone(), x.0.clone(), session_keys(
+					x.2.clone(),
+					x.3.clone(),
+					x.4.clone(),
+					x.5.clone(),
+				))
 			}).collect::<Vec<_>>(),
 		}),
 		pallet_staking: Some(StakingConfig {
-			current_era: 0,
 			validator_count: initial_authorities.len() as u32 * 2,
 			minimum_validator_count: initial_authorities.len() as u32,
 			stakers: initial_authorities.iter().map(|x| {
@@ -261,14 +274,19 @@ pub fn testnet_genesis(
 			.. Default::default()
 		}),
 		pallet_democracy: Some(DemocracyConfig::default()),
-		pallet_collective_Instance1: Some(CouncilConfig {
-			members: endowed_accounts.iter().cloned()
-				.collect::<Vec<_>>()[..(num_endowed_accounts + 1) / 2].to_vec(),
-			phantom: Default::default(),
+		pallet_elections_phragmen: Some(ElectionsConfig {
+			members: endowed_accounts.iter()
+						.take((num_endowed_accounts + 1) / 2)
+						.cloned()
+						.map(|member| (member, STASH))
+						.collect(),
 		}),
+		pallet_collective_Instance1: Some(CouncilConfig::default()),
 		pallet_collective_Instance2: Some(TechnicalCommitteeConfig {
-			members: endowed_accounts.iter().cloned()
-				.collect::<Vec<_>>()[..(num_endowed_accounts + 1) / 2].to_vec(),
+			members: endowed_accounts.iter()
+						.take((num_endowed_accounts + 1) / 2)
+						.cloned()
+						.collect(),
 			phantom: Default::default(),
 		}),
 		pallet_contracts: Some(ContractsConfig {
@@ -276,7 +294,6 @@ pub fn testnet_genesis(
 				enable_println, // this should only be enabled on development chains
 				..Default::default()
 			},
-			gas_price: 1 * MILLICENTS,
 		}),
 		pallet_sudo: Some(SudoConfig {
 			key: root_key,
@@ -296,17 +313,21 @@ pub fn testnet_genesis(
 		pallet_membership_Instance1: Some(Default::default()),
 		pallet_treasury: Some(Default::default()),
 		pallet_society: Some(SocietyConfig {
-			members: endowed_accounts[0..3].to_vec(),
+			members: endowed_accounts.iter()
+						.take((num_endowed_accounts + 1) / 2)
+						.cloned()
+						.collect(),
 			pot: 0,
 			max_members: 999,
-		})
+		}),
+		pallet_vesting: Some(Default::default()),
 	}
 }
 
 fn development_config_genesis() -> GenesisConfig {
 	testnet_genesis(
 		vec![
-			get_authority_keys_from_seed("Alice"),
+			authority_keys_from_seed("Alice"),
 		],
 		get_account_id_from_seed::<sr25519::Public>("Alice"),
 		None,
@@ -319,6 +340,7 @@ pub fn development_config() -> ChainSpec {
 	ChainSpec::from_genesis(
 		"Development",
 		"dev",
+		ChainType::Development,
 		development_config_genesis,
 		vec![],
 		None,
@@ -331,8 +353,8 @@ pub fn development_config() -> ChainSpec {
 fn local_testnet_genesis() -> GenesisConfig {
 	testnet_genesis(
 		vec![
-			get_authority_keys_from_seed("Alice"),
-			get_authority_keys_from_seed("Bob"),
+			authority_keys_from_seed("Alice"),
+			authority_keys_from_seed("Bob"),
 		],
 		get_account_id_from_seed::<sr25519::Public>("Alice"),
 		None,
@@ -345,6 +367,7 @@ pub fn local_testnet_config() -> ChainSpec {
 	ChainSpec::from_genesis(
 		"Local Testnet",
 		"local_testnet",
+		ChainType::Local,
 		local_testnet_genesis,
 		vec![],
 		None,
@@ -357,13 +380,14 @@ pub fn local_testnet_config() -> ChainSpec {
 #[cfg(test)]
 pub(crate) mod tests {
 	use super::*;
-	use crate::service::{new_full, new_light};
+	use crate::service::{new_full_base, new_light_base, NewFullBase};
 	use sc_service_test;
+	use sp_runtime::BuildStorage;
 
 	fn local_testnet_genesis_instant_single() -> GenesisConfig {
 		testnet_genesis(
 			vec![
-				get_authority_keys_from_seed("Alice"),
+				authority_keys_from_seed("Alice"),
 			],
 			get_account_id_from_seed::<sr25519::Public>("Alice"),
 			None,
@@ -376,6 +400,7 @@ pub(crate) mod tests {
 		ChainSpec::from_genesis(
 			"Integration Test",
 			"test",
+			ChainType::Development,
 			local_testnet_genesis_instant_single,
 			vec![],
 			None,
@@ -390,6 +415,7 @@ pub(crate) mod tests {
 		ChainSpec::from_genesis(
 			"Integration Test",
 			"test",
+			ChainType::Development,
 			local_testnet_genesis,
 			vec![],
 			None,
@@ -404,8 +430,30 @@ pub(crate) mod tests {
 	fn test_connectivity() {
 		sc_service_test::connectivity(
 			integration_test_config_with_two_authorities(),
-			|config| new_full(config),
-			|config| new_light(config),
+			|config| {
+				let NewFullBase { task_manager, client, network, transaction_pool, .. }
+					= new_full_base(config,|_, _| ())?;
+				Ok(sc_service_test::TestNetComponents::new(task_manager, client, network, transaction_pool))
+			},
+			|config| {
+				let (keep_alive, _, client, network, transaction_pool) = new_light_base(config)?;
+				Ok(sc_service_test::TestNetComponents::new(keep_alive, client, network, transaction_pool))
+			}
 		);
+	}
+
+	#[test]
+	fn test_create_development_chain_spec() {
+		development_config().build_storage().unwrap();
+	}
+
+	#[test]
+	fn test_create_local_testnet_chain_spec() {
+		local_testnet_config().build_storage().unwrap();
+	}
+
+	#[test]
+	fn test_staging_test_net_chain_spec() {
+		staging_testnet_config().build_storage().unwrap();
 	}
 }

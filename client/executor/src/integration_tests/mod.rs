@@ -1,37 +1,40 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
-
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 mod sandbox;
 
 use codec::{Encode, Decode};
 use hex_literal::hex;
 use sp_core::{
-	Blake2Hasher, blake2_128, blake2_256, ed25519, sr25519, map, Pair,
+	blake2_128, blake2_256, ed25519, sr25519, map, Pair,
 	offchain::{OffchainExt, testing},
-	traits::Externalities,
+	traits::{Externalities, CallInWasm},
 };
-use sc_runtime_test::WASM_BINARY;
+use sc_runtime_test::wasm_binary_unwrap;
 use sp_state_machine::TestExternalities as CoreTestExternalities;
 use test_case::test_case;
 use sp_trie::{TrieConfiguration, trie_types::Layout};
 use sp_wasm_interface::HostFunctions as _;
+use sp_runtime::traits::BlakeTwo256;
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::WasmExecutionMethod;
 
-pub type TestExternalities = CoreTestExternalities<Blake2Hasher, u64>;
+pub type TestExternalities = CoreTestExternalities<BlakeTwo256, u64>;
 type HostFunctions = sp_io::SubstrateHostFunctions;
 
 fn call_in_wasm<E: Externalities>(
@@ -39,15 +42,20 @@ fn call_in_wasm<E: Externalities>(
 	call_data: &[u8],
 	execution_method: WasmExecutionMethod,
 	ext: &mut E,
-) -> crate::error::Result<Vec<u8>> {
-	crate::call_in_wasm::<HostFunctions>(
+) -> Result<Vec<u8>, String> {
+	let executor = crate::WasmExecutor::new(
+		execution_method,
+		Some(1024),
+		HostFunctions::host_functions(),
+		8,
+	);
+	executor.call_in_wasm(
+		&wasm_binary_unwrap()[..],
+		None,
 		function,
 		call_data,
-		execution_method,
 		ext,
-		&WASM_BINARY[..],
-		1024,
-		true,
+		sp_core::traits::MissingHostFunctions::Allow,
 	)
 }
 
@@ -72,7 +80,7 @@ fn call_not_existing_function(wasm_method: WasmExecutionMethod) {
 	let mut ext = TestExternalities::default();
 	let mut ext = ext.ext();
 
-    match call_in_wasm(
+	match call_in_wasm(
 		"test_calling_missing_external",
 		&[],
 		wasm_method,
@@ -83,12 +91,11 @@ fn call_not_existing_function(wasm_method: WasmExecutionMethod) {
 			match wasm_method {
 				WasmExecutionMethod::Interpreted => assert_eq!(
 					&format!("{:?}", e),
-					"Wasmi(Trap(Trap { kind: Host(Other(\"Function `missing_external` is only a stub. Calling a stub is not allowed.\")) }))"
+					"\"Trap: Trap { kind: Host(Other(\\\"Function `missing_external` is only a stub. Calling a stub is not allowed.\\\")) }\""
 				),
 				#[cfg(feature = "wasmtime")]
-				WasmExecutionMethod::Compiled => assert_eq!(
-					&format!("{:?}", e),
-					"Other(\"call to undefined external function with index 67\")"
+				WasmExecutionMethod::Compiled => assert!(
+					format!("{:?}", e).contains("Wasm execution trapped: call to a missing function env:missing_external")
 				),
 			}
 		}
@@ -112,12 +119,11 @@ fn call_yet_another_not_existing_function(wasm_method: WasmExecutionMethod) {
 			match wasm_method {
 				WasmExecutionMethod::Interpreted => assert_eq!(
 					&format!("{:?}", e),
-					"Wasmi(Trap(Trap { kind: Host(Other(\"Function `yet_another_missing_external` is only a stub. Calling a stub is not allowed.\")) }))"
+					"\"Trap: Trap { kind: Host(Other(\\\"Function `yet_another_missing_external` is only a stub. Calling a stub is not allowed.\\\")) }\""
 				),
 				#[cfg(feature = "wasmtime")]
-				WasmExecutionMethod::Compiled => assert_eq!(
-					&format!("{:?}", e),
-					"Other(\"call to undefined external function with index 68\")"
+				WasmExecutionMethod::Compiled => assert!(
+					format!("{:?}", e).contains("Wasm execution trapped: call to a missing function env:yet_another_missing_external")
 				),
 			}
 		}
@@ -180,7 +186,7 @@ fn storage_should_work(wasm_method: WasmExecutionMethod) {
 			b"foo".to_vec() => b"bar".to_vec(),
 			b"baz".to_vec() => b"bar".to_vec()
 		],
-		children: map![],
+		children_default: map![],
 	});
 	assert_eq!(ext, expected);
 }
@@ -214,7 +220,7 @@ fn clear_prefix_should_work(wasm_method: WasmExecutionMethod) {
 			b"aab".to_vec() => b"2".to_vec(),
 			b"bbb".to_vec() => b"5".to_vec()
 		],
-		children: map![],
+		children_default: map![],
 	});
 	assert_eq!(expected, ext);
 }
@@ -440,7 +446,29 @@ fn ordered_trie_root_should_work(wasm_method: WasmExecutionMethod) {
 			wasm_method,
 			&mut ext.ext(),
 		).unwrap(),
-		Layout::<Blake2Hasher>::ordered_trie_root(trie_input.iter()).as_bytes().encode(),
+		Layout::<BlakeTwo256>::ordered_trie_root(trie_input.iter()).as_bytes().encode(),
+	);
+}
+
+#[test_case(WasmExecutionMethod::Interpreted)]
+#[cfg_attr(feature = "wasmtime", test_case(WasmExecutionMethod::Compiled))]
+fn offchain_index(wasm_method: WasmExecutionMethod) {
+	let mut ext = TestExternalities::default();
+	let (offchain, _state) = testing::TestOffchainExt::new();
+	ext.register_extension(OffchainExt::new(offchain));
+	call_in_wasm(
+		"test_offchain_index_set",
+		&[0],
+		wasm_method,
+		&mut ext.ext(),
+	).unwrap();
+
+	use sp_core::offchain::storage::OffchainOverlayedChange;
+	assert_eq!(
+		ext.ext()
+			.get_offchain_storage_changes()
+			.get(sp_core::offchain::STORAGE_PREFIX, b"k"),
+		Some(OffchainOverlayedChange::SetValue(b"v".to_vec()))
 	);
 }
 
@@ -470,9 +498,7 @@ fn offchain_http_should_work(wasm_method: WasmExecutionMethod) {
 	let mut ext = TestExternalities::default();
 	let (offchain, state) = testing::TestOffchainExt::new();
 	ext.register_extension(OffchainExt::new(offchain));
-	state.write().expect_request(
-		0,
-		testing::PendingRequest {
+	state.write().expect_request(testing::PendingRequest {
 			method: "POST".into(),
 			uri: "http://localhost:12345".into(),
 			body: vec![1, 2, 3, 4],
@@ -501,36 +527,41 @@ fn offchain_http_should_work(wasm_method: WasmExecutionMethod) {
 fn should_trap_when_heap_exhausted(wasm_method: WasmExecutionMethod) {
 	let mut ext = TestExternalities::default();
 
-	crate::call_in_wasm::<HostFunctions>(
+	let executor = crate::WasmExecutor::new(
+		wasm_method,
+		Some(17),  // `17` is the initial number of pages compiled into the binary.
+		HostFunctions::host_functions(),
+		8,
+	);
+	executor.call_in_wasm(
+		&wasm_binary_unwrap()[..],
+		None,
 		"test_exhaust_heap",
 		&[0],
-		wasm_method,
 		&mut ext.ext(),
-		&WASM_BINARY[..],
-		// `17` is the initial number of pages compiled into the binary.
-		17,
-		true,
+		sp_core::traits::MissingHostFunctions::Allow,
 	).unwrap();
 }
 
 #[test_case(WasmExecutionMethod::Interpreted)]
 #[cfg_attr(feature = "wasmtime", test_case(WasmExecutionMethod::Compiled))]
 fn returns_mutable_static(wasm_method: WasmExecutionMethod) {
-	let mut instance = crate::wasm_runtime::create_wasm_runtime_with_code(
+	let runtime = crate::wasm_runtime::create_wasm_runtime_with_code(
 		wasm_method,
 		1024,
-		&WASM_BINARY[..],
+		&wasm_binary_unwrap()[..],
 		HostFunctions::host_functions(),
 		true,
-	).expect("Creates instance");
+	).expect("Creates runtime");
 
-	let res = instance.call("returns_mutable_static", &[0]).unwrap();
+	let instance = runtime.new_instance().unwrap();
+	let res = instance.call_export("returns_mutable_static", &[0]).unwrap();
 	assert_eq!(33, u64::decode(&mut &res[..]).unwrap());
 
 	// We expect that every invocation will need to return the initial
 	// value plus one. If the value increases more than that then it is
 	// a sign that the wasm runtime preserves the memory content.
-	let res = instance.call("returns_mutable_static", &[0]).unwrap();
+	let res = instance.call_export("returns_mutable_static", &[0]).unwrap();
 	assert_eq!(33, u64::decode(&mut &res[..]).unwrap());
 }
 
@@ -549,19 +580,191 @@ fn restoration_of_globals(wasm_method: WasmExecutionMethod) {
 	// to our allocator algorithm there are inefficiencies.
 	const REQUIRED_MEMORY_PAGES: u64 = 32;
 
-	let mut instance = crate::wasm_runtime::create_wasm_runtime_with_code(
+	let runtime = crate::wasm_runtime::create_wasm_runtime_with_code(
 		wasm_method,
 		REQUIRED_MEMORY_PAGES,
-		&WASM_BINARY[..],
+		&wasm_binary_unwrap()[..],
 		HostFunctions::host_functions(),
 		true,
-	).expect("Creates instance");
+	).expect("Creates runtime");
+	let instance = runtime.new_instance().unwrap();
 
 	// On the first invocation we allocate approx. 768KB (75%) of stack and then trap.
-	let res = instance.call("allocates_huge_stack_array", &true.encode());
+	let res = instance.call_export("allocates_huge_stack_array", &true.encode());
 	assert!(res.is_err());
 
 	// On the second invocation we allocate yet another 768KB (75%) of stack
-	let res = instance.call("allocates_huge_stack_array", &false.encode());
+	let res = instance.call_export("allocates_huge_stack_array", &false.encode());
 	assert!(res.is_ok());
+}
+
+#[test_case(WasmExecutionMethod::Interpreted)]
+fn heap_is_reset_between_calls(wasm_method: WasmExecutionMethod) {
+	let runtime = crate::wasm_runtime::create_wasm_runtime_with_code(
+		wasm_method,
+		1024,
+		&wasm_binary_unwrap()[..],
+		HostFunctions::host_functions(),
+		true,
+	).expect("Creates runtime");
+	let instance = runtime.new_instance().unwrap();
+
+	let heap_base = instance.get_global_const("__heap_base")
+		.expect("`__heap_base` is valid")
+		.expect("`__heap_base` exists")
+		.as_i32()
+		.expect("`__heap_base` is an `i32`");
+
+	let params = (heap_base as u32, 512u32 * 64 * 1024).encode();
+	instance.call_export("check_and_set_in_heap", &params).unwrap();
+
+	// Cal it a second time to check that the heap was freed.
+	instance.call_export("check_and_set_in_heap", &params).unwrap();
+}
+
+#[test_case(WasmExecutionMethod::Interpreted)]
+#[cfg_attr(feature = "wasmtime", test_case(WasmExecutionMethod::Compiled))]
+fn parallel_execution(wasm_method: WasmExecutionMethod) {
+	let executor = std::sync::Arc::new(crate::WasmExecutor::new(
+		wasm_method,
+		Some(1024),
+		HostFunctions::host_functions(),
+		8,
+	));
+	let code_hash = blake2_256(wasm_binary_unwrap()).to_vec();
+	let threads: Vec<_> = (0..8).map(|_|
+		{
+			let executor = executor.clone();
+			let code_hash = code_hash.clone();
+			std::thread::spawn(move || {
+				let mut ext = TestExternalities::default();
+				let mut ext = ext.ext();
+				assert_eq!(
+					executor.call_in_wasm(
+						&wasm_binary_unwrap()[..],
+						Some(code_hash.clone()),
+						"test_twox_128",
+						&[0],
+						&mut ext,
+						sp_core::traits::MissingHostFunctions::Allow,
+					).unwrap(),
+					hex!("99e9d85137db46ef4bbea33613baafd5").to_vec().encode(),
+				);
+			})
+		}).collect();
+
+	for t in threads.into_iter() {
+		t.join().unwrap();
+	}
+}
+
+#[test_case(WasmExecutionMethod::Interpreted)]
+fn wasm_tracing_should_work(wasm_method: WasmExecutionMethod) {
+
+	use std::sync::{Arc, Mutex};
+
+	use sc_tracing::{SpanDatum, TraceEvent};
+
+	struct TestTraceHandler(Arc<Mutex<Vec<SpanDatum>>>);
+
+	impl sc_tracing::TraceHandler for TestTraceHandler {
+		fn handle_span(&self, sd: SpanDatum) {
+			self.0.lock().unwrap().push(sd);
+		}
+
+		fn handle_event(&self, _event: TraceEvent) {}
+	}
+
+	let traces = Arc::new(Mutex::new(Vec::new()));
+	let handler = TestTraceHandler(traces.clone());
+
+	// Create subscriber with wasm_tracing disabled
+	let test_subscriber = tracing_subscriber::fmt().finish().with(
+		sc_tracing::ProfilingLayer::new_with_handler(
+			Box::new(handler), "default"
+		)
+	);
+
+	let _guard = tracing::subscriber::set_default(test_subscriber);
+
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	let span_id = call_in_wasm(
+		"test_enter_span",
+		Default::default(),
+		wasm_method,
+		&mut ext,
+	).unwrap();
+
+	let span_id = u64::decode(&mut &span_id[..]).unwrap();
+
+	assert!(
+		span_id > 0
+	);
+
+	call_in_wasm(
+		"test_exit_span",
+		&span_id.encode(),
+		wasm_method,
+		&mut ext,
+	).unwrap();
+
+	// Check there is only the single trace
+	let len = traces.lock().unwrap().len();
+	assert_eq!(len, 1);
+
+	let span_datum = traces.lock().unwrap().pop().unwrap();
+	let values = span_datum.values;
+	assert_eq!(span_datum.target, "default");
+	assert_eq!(span_datum.name, "");
+	assert_eq!(values.bool_values.get("wasm").unwrap(), &true);
+}
+
+#[test_case(WasmExecutionMethod::Interpreted)]
+#[cfg_attr(feature = "wasmtime", test_case(WasmExecutionMethod::Compiled))]
+fn spawning_runtime_instance_should_work(wasm_method: WasmExecutionMethod) {
+
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	call_in_wasm(
+		"test_spawn",
+		&[],
+		wasm_method,
+		&mut ext,
+	).unwrap();
+}
+
+#[test_case(WasmExecutionMethod::Interpreted)]
+#[cfg_attr(feature = "wasmtime", test_case(WasmExecutionMethod::Compiled))]
+fn spawning_runtime_instance_nested_should_work(wasm_method: WasmExecutionMethod) {
+
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	call_in_wasm(
+		"test_nested_spawn",
+		&[],
+		wasm_method,
+		&mut ext,
+	).unwrap();
+}
+
+#[test_case(WasmExecutionMethod::Interpreted)]
+#[cfg_attr(feature = "wasmtime", test_case(WasmExecutionMethod::Compiled))]
+fn panic_in_spawned_instance_panics_on_joining_its_result(wasm_method: WasmExecutionMethod) {
+
+	let mut ext = TestExternalities::default();
+	let mut ext = ext.ext();
+
+	let error_result = call_in_wasm(
+		"test_panic_in_spawned",
+		&[],
+		wasm_method,
+		&mut ext,
+	).unwrap_err();
+
+	dbg!(&error_result);
+	assert!(format!("{}", error_result).contains("Spawned task"));
 }

@@ -1,18 +1,20 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Contains the object that makes the telemetry work.
 //!
@@ -26,9 +28,13 @@
 //!   events indicating what happened since the latest polling.
 //!
 
-use bytes::BytesMut;
 use futures::{prelude::*, ready};
-use libp2p::{core::transport::OptionalTransport, Multiaddr, Transport, wasm_ext};
+use libp2p::{
+	core::transport::{OptionalTransport, timeout::TransportTimeout},
+	Multiaddr,
+	Transport,
+	wasm_ext
+};
 use log::{trace, warn, error};
 use slog::Drain;
 use std::{io, pin::Pin, task::Context, task::Poll, time};
@@ -57,13 +63,12 @@ pub struct TelemetryWorker {
 trait StreamAndSink<I>: Stream + Sink<I> {}
 impl<T: ?Sized + Stream + Sink<I>, I> StreamAndSink<I> for T {}
 
-type WsTrans = libp2p::core::transport::boxed::Boxed<
+type WsTrans = libp2p::core::transport::Boxed<
 	Pin<Box<dyn StreamAndSink<
-		BytesMut,
-		Item = Result<BytesMut, io::Error>,
+		Vec<u8>,
+		Item = Result<Vec<u8>, io::Error>,
 		Error = io::Error
-	> + Send>>,
-	io::Error
+	> + Send>>
 >;
 
 impl TelemetryWorker {
@@ -90,26 +95,25 @@ impl TelemetryWorker {
 			libp2p::websocket::framed::WsConfig::new(inner)
 				.and_then(|connec, _| {
 					let connec = connec
-						.with(|item: BytesMut| {
+						.with(|item| {
 							let item = libp2p::websocket::framed::OutgoingData::Binary(item);
 							future::ready(Ok::<_, io::Error>(item))
 						})
 						.try_filter(|item| future::ready(item.is_data()))
-						.map_ok(|data| BytesMut::from(data.as_ref()));
+						.map_ok(|data| data.into_bytes());
 					future::ready(Ok::<_, io::Error>(connec))
 				})
 		});
 
-		let transport = transport
-			.timeout(CONNECT_TIMEOUT)
-			.map_err(|err| io::Error::new(io::ErrorKind::Other, err))
-			.map(|out, _| {
+		let transport = TransportTimeout::new(
+			transport.map(|out, _| {
 				let out = out
 					.map_err(|err| io::Error::new(io::ErrorKind::Other, err))
 					.sink_map_err(|err| io::Error::new(io::ErrorKind::Other, err));
 				Box::pin(out) as Pin<Box<_>>
-			})
-			.boxed();
+			}),
+			CONNECT_TIMEOUT
+		).boxed();
 
 		Ok(TelemetryWorker {
 			nodes: endpoints.into_iter().map(|(addr, verbosity)| {
@@ -187,7 +191,7 @@ impl TelemetryWorker {
 /// For some context, we put this object around the `wasm_ext::ExtTransport` in order to make sure
 /// that each telemetry message maps to one single call to `write` in the WASM FFI.
 #[pin_project::pin_project]
-struct StreamSink<T>(#[pin] T, Option<BytesMut>);
+struct StreamSink<T>(#[pin] T, Option<Vec<u8>>);
 
 impl<T> From<T> for StreamSink<T> {
 	fn from(inner: T) -> StreamSink<T> {
@@ -196,15 +200,15 @@ impl<T> From<T> for StreamSink<T> {
 }
 
 impl<T: AsyncRead> Stream for StreamSink<T> {
-	type Item = Result<BytesMut, io::Error>;
+	type Item = Result<Vec<u8>, io::Error>;
 
 	fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
 		let this = self.project();
-		let mut buf = [0; 128];
+		let mut buf = vec![0; 128];
 		match ready!(AsyncRead::poll_read(this.0, cx, &mut buf)) {
 			Ok(0) => Poll::Ready(None),
 			Ok(n) => {
-				let buf: BytesMut = buf[..n].into();
+				buf.truncate(n);
 				Poll::Ready(Some(Ok(buf)))
 			},
 			Err(err) => Poll::Ready(Some(Err(err))),
@@ -230,7 +234,7 @@ impl<T: AsyncWrite> StreamSink<T> {
 	}
 }
 
-impl<T: AsyncWrite> Sink<BytesMut> for StreamSink<T> {
+impl<T: AsyncWrite> Sink<Vec<u8>> for StreamSink<T> {
 	type Error = io::Error;
 
 	fn poll_ready(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
@@ -238,7 +242,7 @@ impl<T: AsyncWrite> Sink<BytesMut> for StreamSink<T> {
 		Poll::Ready(Ok(()))
 	}
 
-	fn start_send(self: Pin<&mut Self>, item: BytesMut) -> Result<(), Self::Error> {
+	fn start_send(self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
 		let this = self.project();
 		debug_assert!(this.1.is_none());
 		*this.1 = Some(item);

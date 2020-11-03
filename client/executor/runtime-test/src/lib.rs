@@ -1,9 +1,15 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(feature = "strict", deny(warnings))]
 
 // Make the WASM binary available.
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
+
+#[cfg(feature = "std")]
+/// Wasm binary unwrapped. If built with `BUILD_DUMMY_WASM_BINARY`, the function panics.
+pub fn wasm_binary_unwrap() -> &'static [u8] {
+	WASM_BINARY.expect("Development wasm binary is not available. Testing is only \
+						supported with the flag disabled.")
+}
 
 #[cfg(not(feature = "std"))]
 use sp_std::{vec::Vec, vec};
@@ -11,12 +17,14 @@ use sp_std::{vec::Vec, vec};
 #[cfg(not(feature = "std"))]
 use sp_io::{
 	storage, hashing::{blake2_128, blake2_256, sha2_256, twox_128, twox_256},
-	crypto::{ed25519_verify, sr25519_verify},
+	crypto::{ed25519_verify, sr25519_verify}, wasm_tracing,
 };
 #[cfg(not(feature = "std"))]
 use sp_runtime::{print, traits::{BlakeTwo256, Hash}};
 #[cfg(not(feature = "std"))]
 use sp_core::{ed25519, sr25519};
+#[cfg(not(feature = "std"))]
+use sp_sandbox::Value;
 
 extern "C" {
 	#[allow(dead_code)]
@@ -133,8 +141,8 @@ sp_core::wasm_export_functions! {
 		execute_sandboxed(
 			&code,
 			&[
-				sp_sandbox::TypedValue::I32(0x12345678),
-				sp_sandbox::TypedValue::I64(0x1234567887654321),
+				Value::I32(0x12345678),
+				Value::I64(0x1234567887654321),
 			],
 		).is_ok()
 	}
@@ -143,10 +151,10 @@ sp_core::wasm_export_functions! {
 		let ok = match execute_sandboxed(
 			&code,
 			&[
-				sp_sandbox::TypedValue::I32(0x1336),
+				Value::I32(0x1336),
 			]
 		) {
-			Ok(sp_sandbox::ReturnValue::Value(sp_sandbox::TypedValue::I32(0x1337))) => true,
+			Ok(sp_sandbox::ReturnValue::Value(Value::I32(0x1337))) => true,
 			_ => false,
 		};
 
@@ -164,6 +172,28 @@ sp_core::wasm_export_functions! {
 
 		code
 	}
+
+
+	fn test_sandbox_get_global_val(code: Vec<u8>) -> i64 {
+		let env_builder = sp_sandbox::EnvironmentDefinitionBuilder::new();
+		let instance = if let Ok(i) = sp_sandbox::Instance::new(&code, &env_builder, &mut ()) {
+			i
+		} else {
+			return 20;
+		};
+
+		match instance.get_global_val("test_global") {
+			Some(sp_sandbox::Value::I64(val)) => val,
+			None => 30,
+			val => 40,
+		}
+	}
+
+
+	fn test_offchain_index_set() {
+		sp_io::offchain_index::set(b"k", b"v");
+	}
+
 
 	fn test_offchain_local_storage() -> bool {
 		let kind = sp_core::offchain::StorageKind::PERSISTENT;
@@ -223,6 +253,14 @@ sp_core::wasm_export_functions! {
 		sp_allocator::FreeingBumpHeapAllocator::new(0);
 	}
 
+	fn test_enter_span() -> u64 {
+		wasm_tracing::enter_span(Default::default())
+	}
+
+	fn test_exit_span(span_id: u64) {
+		wasm_tracing::exit(span_id)
+	}
+
 	fn returns_mutable_static() -> u64 {
 		unsafe {
 			MUTABLE_STATIC += 1;
@@ -257,12 +295,63 @@ sp_core::wasm_export_functions! {
 
 		data.to_vec()
 	}
+
+	// Check that the heap at `heap_base + offset` don't contains the test message.
+	// After the check succeeds the test message is written into the heap.
+	//
+	// It is expected that the given pointer is not allocated.
+	fn check_and_set_in_heap(heap_base: u32, offset: u32) {
+		let test_message = b"Hello invalid heap memory";
+		let ptr = unsafe { (heap_base + offset) as *mut u8 };
+
+		let message_slice = unsafe { sp_std::slice::from_raw_parts_mut(ptr, test_message.len()) };
+
+		assert_ne!(test_message, message_slice);
+		message_slice.copy_from_slice(test_message);
+	}
+
+	fn test_spawn() {
+		let data = vec![1u8, 2u8];
+		let data_new = sp_tasks::spawn(tasks::incrementer, data).join();
+
+		assert_eq!(data_new, vec![2u8, 3u8]);
+	}
+
+	fn test_nested_spawn() {
+		let data = vec![7u8, 13u8];
+		let data_new = sp_tasks::spawn(tasks::parallel_incrementer, data).join();
+
+		assert_eq!(data_new, vec![10u8, 16u8]);
+	}
+
+	fn test_panic_in_spawned() {
+		sp_tasks::spawn(tasks::panicker, vec![]).join();
+	}
+ }
+
+ #[cfg(not(feature = "std"))]
+ mod tasks {
+	use sp_std::prelude::*;
+
+	pub fn incrementer(data: Vec<u8>) -> Vec<u8> {
+	   data.into_iter().map(|v| v + 1).collect()
+	}
+
+	pub fn panicker(_: Vec<u8>) -> Vec<u8> {
+		panic!()
+	}
+
+	pub fn parallel_incrementer(data: Vec<u8>) -> Vec<u8> {
+	   let first = data.into_iter().map(|v| v + 2).collect::<Vec<_>>();
+	   let second = sp_tasks::spawn(incrementer, first).join();
+	   second
+	}
  }
 
 #[cfg(not(feature = "std"))]
 fn execute_sandboxed(
 	code: &[u8],
-	args: &[sp_sandbox::TypedValue],
+	args: &[Value],
 ) -> Result<sp_sandbox::ReturnValue, sp_sandbox::HostError> {
 	struct State {
 		counter: u32,
@@ -270,7 +359,7 @@ fn execute_sandboxed(
 
 	fn env_assert(
 		_e: &mut State,
-		args: &[sp_sandbox::TypedValue],
+		args: &[Value],
 	) -> Result<sp_sandbox::ReturnValue, sp_sandbox::HostError> {
 		if args.len() != 1 {
 			return Err(sp_sandbox::HostError);
@@ -284,14 +373,14 @@ fn execute_sandboxed(
 	}
 	fn env_inc_counter(
 		e: &mut State,
-		args: &[sp_sandbox::TypedValue],
+		args: &[Value],
 	) -> Result<sp_sandbox::ReturnValue, sp_sandbox::HostError> {
 		if args.len() != 1 {
 			return Err(sp_sandbox::HostError);
 		}
 		let inc_by = args[0].as_i32().ok_or_else(|| sp_sandbox::HostError)?;
 		e.counter += inc_by as u32;
-		Ok(sp_sandbox::ReturnValue::Value(sp_sandbox::TypedValue::I32(e.counter as i32)))
+		Ok(sp_sandbox::ReturnValue::Value(Value::I32(e.counter as i32)))
 	}
 
 	let mut state = State { counter: 0 };
@@ -308,7 +397,7 @@ fn execute_sandboxed(
 				Memory::new() can't return a Error qed"
 			),
 		};
-		env_builder.add_memory("env", "memory", memory.clone());
+		env_builder.add_memory("env", "memory", memory);
 		env_builder
 	};
 

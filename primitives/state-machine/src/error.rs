@@ -1,29 +1,30 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 /// State Machine Errors
 
-use std::fmt;
+use sp_std::fmt;
 
 /// State Machine Error bound.
 ///
 /// This should reflect Wasm error type bound for future compatibility.
-pub trait Error: 'static + fmt::Debug + fmt::Display + Send {}
+pub trait Error: 'static + fmt::Debug + fmt::Display + Send + Sync {}
 
-impl<T: 'static + fmt::Debug + fmt::Display + Send> Error for T {}
+impl<T: 'static + fmt::Debug + fmt::Display + Send + Sync> Error for T {}
 
 /// Externalities Error.
 ///
@@ -31,17 +32,18 @@ impl<T: 'static + fmt::Debug + fmt::Display + Send> Error for T {}
 /// would not be executed unless externalities were available. This is included for completeness,
 /// and as a transition away from the pre-existing framework.
 #[derive(Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "std", derive(thiserror::Error))]
 pub enum ExecutionError {
 	/// Backend error.
-	Backend(String),
+	#[cfg_attr(feature = "std", error("Backend error {0:?}"))]
+	Backend(crate::DefaultError),
 	/// The entry `:code` doesn't exist in storage so there's no way we can execute anything.
+	#[cfg_attr(feature = "std", error("`:code` entry does not exist in storage"))]
 	CodeEntryDoesNotExist,
 	/// Backend is incompatible with execution proof generation process.
+	#[cfg_attr(feature = "std", error("Unable to generate proof"))]
 	UnableToGenerateProof,
 	/// Invalid execution proof.
+	#[cfg_attr(feature = "std", error("Invalid execution proof"))]
 	InvalidProof,
-}
-
-impl fmt::Display for ExecutionError {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "Externalities Error") }
 }

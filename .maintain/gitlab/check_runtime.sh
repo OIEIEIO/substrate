@@ -3,7 +3,7 @@
 #
 # check for any changes in the node/src/runtime, frame/ and primitives/sr_* trees. if
 # there are any changes found, it should mark the PR breaksconsensus and
-# "auto-fail" the PR if there isn't a change in the runtime/src/lib.rs file 
+# "auto-fail" the PR if there isn't a change in the runtime/src/lib.rs file
 # that alters the version.
 
 set -e # fail on any error
@@ -30,8 +30,11 @@ github_label () {
 boldprint "latest 10 commits of ${CI_COMMIT_REF_NAME}"
 git log --graph --oneline --decorate=short -n 10
 
-boldprint "make sure the master branch is available in shallow clones"
+boldprint "make sure the master branch and release tag are available in shallow clones"
 git fetch --depth=${GIT_DEPTH:-100} origin master
+git fetch --depth=${GIT_DEPTH:-100} origin release
+git tag -f release FETCH_HEAD
+git log -n1 release
 
 
 boldprint "check if the wasm sources changed"
@@ -40,7 +43,7 @@ if ! git diff --name-only origin/master...${CI_COMMIT_SHA} \
 	| grep -q -e '^bin/node/src/runtime' -e '^frame/' -e '^primitives/sr-'
 then
 	boldcat <<-EOT
-	
+
 	no changes to the runtime source code detected
 
 	EOT
@@ -54,9 +57,9 @@ fi
 # consensus-critical logic that has changed. the runtime wasm blobs must be
 # rebuilt.
 
-add_spec_version="$(git diff origin/master...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
+add_spec_version="$(git diff tags/release...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
 	| sed -n -r "s/^\+[[:space:]]+spec_version: +([0-9]+),$/\1/p")"
-sub_spec_version="$(git diff origin/master...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
+sub_spec_version="$(git diff tags/release...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
 	| sed -n -r "s/^\-[[:space:]]+spec_version: +([0-9]+),$/\1/p")"
 
 
@@ -64,12 +67,12 @@ sub_spec_version="$(git diff origin/master...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
 if [ "${add_spec_version}" != "${sub_spec_version}" ]
 then
 
-	github_label "B2-breaksapi"
+	github_label "D2-breaksapi"
 
 	boldcat <<-EOT
-		
+
 		changes to the runtime sources and changes in the spec version.
-	
+
 		spec_version: ${sub_spec_version} -> ${add_spec_version}
 
 	EOT
@@ -79,9 +82,9 @@ else
 	# check for impl_version updates: if only the impl versions changed, we assume
 	# there is no consensus-critical logic that has changed.
 
-	add_impl_version="$(git diff origin/master...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
+	add_impl_version="$(git diff tags/release...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
 		| sed -n -r 's/^\+[[:space:]]+impl_version: +([0-9]+),$/\1/p')"
-	sub_impl_version="$(git diff origin/master...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
+	sub_impl_version="$(git diff tags/release...${CI_COMMIT_SHA} ${VERSIONS_FILE} \
 		| sed -n -r 's/^\-[[:space:]]+impl_version: +([0-9]+),$/\1/p')"
 
 
@@ -89,7 +92,7 @@ else
 	if [ "${add_impl_version}" != "${sub_impl_version}" ]
 	then
 		boldcat <<-EOT
-		
+
 		changes to the runtime sources and changes in the impl version.
 
 		impl_version: ${sub_impl_version} -> ${add_impl_version}
@@ -101,9 +104,8 @@ else
 
 	boldcat <<-EOT
 
-	wasm source files changed but not the spec/impl version and the runtime
-	binary blob. If changes made do not alter logic, just bump 'impl_version'.
-	If they do change logic, bump 'spec_version' and rebuild wasm.
+	wasm source files changed but not the spec/impl version. If changes made do not alter logic,
+	just bump 'impl_version'. If they do change logic, bump 'spec_version'.
 
 	source file directories:
 	- bin/node/src/runtime

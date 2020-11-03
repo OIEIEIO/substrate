@@ -1,18 +1,19 @@
-// Copyright 2018-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use codec::{Decode, Encode};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -23,22 +24,28 @@ use node_runtime::{
 };
 use node_runtime::constants::currency::*;
 use node_testing::keyring::*;
-use sp_core::{Blake2Hasher, NativeOrEncoded, NeverNativeValue};
+use sp_core::{NativeOrEncoded, NeverNativeValue};
 use sp_core::storage::well_known_keys;
-use sp_core::traits::CodeExecutor;
-use	frame_support::Hashable;
+use sp_core::traits::{CodeExecutor, RuntimeCode};
+use frame_support::Hashable;
 use sp_state_machine::TestExternalities as CoreTestExternalities;
 use sc_executor::{NativeExecutor, RuntimeInfo, WasmExecutionMethod, Externalities};
+use sp_runtime::traits::BlakeTwo256;
 
 criterion_group!(benches, bench_execute_block);
 criterion_main!(benches);
 
 /// The wasm runtime code.
-const COMPACT_CODE: &[u8] = node_runtime::WASM_BINARY;
+pub fn compact_code_unwrap() -> &'static [u8] {
+	node_runtime::WASM_BINARY.expect("Development wasm binary is not available. \
+									  Testing is only supported with the flag disabled.")
+}
 
 const GENESIS_HASH: [u8; 32] = [69u8; 32];
 
-const VERSION: u32 = node_runtime::VERSION.spec_version;
+const TRANSACTION_VERSION: u32 = node_runtime::VERSION.transaction_version;
+
+const SPEC_VERSION: u32 = node_runtime::VERSION.spec_version;
 
 const HEAP_PAGES: u64 = 20;
 
@@ -51,12 +58,12 @@ enum ExecutionMethod {
 }
 
 fn sign(xt: CheckedExtrinsic) -> UncheckedExtrinsic {
-	node_testing::keyring::sign(xt, VERSION, GENESIS_HASH)
+	node_testing::keyring::sign(xt, SPEC_VERSION, TRANSACTION_VERSION, GENESIS_HASH)
 }
 
-fn new_test_ext(genesis_config: &GenesisConfig) -> TestExternalities<Blake2Hasher> {
+fn new_test_ext(genesis_config: &GenesisConfig) -> TestExternalities<BlakeTwo256> {
 	let mut test_ext = TestExternalities::new_with_code(
-		COMPACT_CODE,
+		compact_code_unwrap(),
 		genesis_config.build_storage().unwrap(),
 	);
 	test_ext.ext().place_storage(well_known_keys::HEAP_PAGES.to_vec(), Some(HEAP_PAGES.encode()));
@@ -76,7 +83,7 @@ fn construct_block<E: Externalities>(
 	let extrinsics = extrinsics.into_iter().map(sign).collect::<Vec<_>>();
 
 	// calculate the header fields that we can.
-	let extrinsics_root = Layout::<Blake2Hasher>::ordered_trie_root(
+	let extrinsics_root = Layout::<BlakeTwo256>::ordered_trie_root(
 		extrinsics.iter().map(Encode::encode)
 	).to_fixed_bytes()
 		.into();
@@ -89,9 +96,16 @@ fn construct_block<E: Externalities>(
 		digest: Default::default(),
 	};
 
+	let runtime_code = RuntimeCode {
+		code_fetcher: &sp_core::traits::WrappedRuntimeCode(compact_code_unwrap().into()),
+		hash: vec![1, 2, 3],
+		heap_pages: None,
+	};
+
 	// execute the block to get the real header.
-	executor.call::<_, NeverNativeValue, fn() -> _>(
+	executor.call::<NeverNativeValue, fn() -> _>(
 		ext,
+		&runtime_code,
 		"Core_initialize_block",
 		&header.encode(),
 		true,
@@ -99,8 +113,9 @@ fn construct_block<E: Externalities>(
 	).0.unwrap();
 
 	for i in extrinsics.iter() {
-		executor.call::<_, NeverNativeValue, fn() -> _>(
+		executor.call::<NeverNativeValue, fn() -> _>(
 			ext,
+			&runtime_code,
 			"BlockBuilder_apply_extrinsic",
 			&i.encode(),
 			true,
@@ -108,8 +123,9 @@ fn construct_block<E: Externalities>(
 		).0.unwrap();
 	}
 
-	let header = match executor.call::<_, NeverNativeValue, fn() -> _>(
+	let header = match executor.call::<NeverNativeValue, fn() -> _>(
 		ext,
+		&runtime_code,
 		"BlockBuilder_finalize_block",
 		&[0u8;0],
 		true,
@@ -155,17 +171,23 @@ fn bench_execute_block(c: &mut Criterion) {
 	c.bench_function_over_inputs(
 		"execute blocks",
 		|b, strategy| {
-			let genesis_config = node_testing::genesis::config(false, Some(COMPACT_CODE));
+			let genesis_config = node_testing::genesis::config(false, Some(compact_code_unwrap()));
 			let (use_native, wasm_method) = match strategy {
 				ExecutionMethod::Native => (true, WasmExecutionMethod::Interpreted),
 				ExecutionMethod::Wasm(wasm_method) => (false, *wasm_method),
 			};
-			let executor = NativeExecutor::new(wasm_method, None);
+
+			let executor = NativeExecutor::new(wasm_method, None, 8);
+			let runtime_code = RuntimeCode {
+				code_fetcher: &sp_core::traits::WrappedRuntimeCode(compact_code_unwrap().into()),
+				hash: vec![1, 2, 3],
+				heap_pages: None,
+			};
 
 			// Get the runtime version to initialize the runtimes cache.
 			{
 				let mut test_ext = new_test_ext(&genesis_config);
-				executor.runtime_version(&mut test_ext.ext());
+				executor.runtime_version(&mut test_ext.ext(), &runtime_code).unwrap();
 			}
 
 			let blocks = test_blocks(&genesis_config, &executor);
@@ -174,8 +196,9 @@ fn bench_execute_block(c: &mut Criterion) {
 				|| new_test_ext(&genesis_config),
 				|test_ext| {
 					for block in blocks.iter() {
-						executor.call::<_, NeverNativeValue, fn() -> _>(
+						executor.call::<NeverNativeValue, fn() -> _>(
 							&mut test_ext.ext(),
+							&runtime_code,
 							"Core_execute_block",
 							&block.0,
 							use_native,

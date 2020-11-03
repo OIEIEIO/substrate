@@ -1,64 +1,104 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Initialization errors.
+
+use sp_core::crypto;
 
 /// Result type alias for the CLI.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Error type for the CLI.
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
 	/// Io error
-	Io(std::io::Error),
+	#[error(transparent)]
+	Io(#[from] std::io::Error),
 	/// Cli error
-	Cli(clap::Error),
+	#[error(transparent)]
+	Cli(#[from] structopt::clap::Error),
 	/// Service error
-	Service(sc_service::Error),
+	#[error(transparent)]
+	Service(#[from] sc_service::Error),
 	/// Client error
-	Client(sp_blockchain::Error),
+	#[error(transparent)]
+	Client(#[from] sp_blockchain::Error),
+	/// scale codec error
+	#[error(transparent)]
+	Codec(#[from] parity_scale_codec::Error),
 	/// Input error
-	#[from(ignore)]
+	#[error("Invalid input: {0}")]
 	Input(String),
 	/// Invalid listen multiaddress
-	#[display(fmt="Invalid listen multiaddress")]
+	#[error("Invalid listen multiaddress")]
 	InvalidListenMultiaddress,
-	/// Other uncategorized error.
-	#[from(ignore)]
+	/// Application specific error chain sequence forwarder.
+	#[error(transparent)]
+	Application(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
+	/// URI error.
+	#[error("Invalid URI; expecting either a secret URI or a public URI.")]
+	InvalidUri(crypto::PublicError),
+	/// Signature length mismatch.
+	#[error("Signature has an invalid length. Read {read} bytes, expected {expected} bytes")]
+	SignatureInvalidLength {
+		/// Amount of signature bytes read.
+		read: usize,
+		/// Expected number of signature bytes.
+		expected: usize,
+	},
+	/// Missing base path argument.
+	#[error("The base path is missing, please provide one")]
+	MissingBasePath,
+	/// Unknown key type specifier or missing key type specifier.
+	#[error("Unknown key type, must be a known 4-character sequence")]
+	KeyTypeInvalid,
+	/// Signature verification failed.
+	#[error("Signature verification failed")]
+	SignatureInvalid,
+	/// Storing a given key failed.
+	#[error("Key store operation failed")]
+	KeyStoreOperation,
+	/// An issue with the underlying key storage was encountered.
+	#[error("Key storage issue encountered")]
+	KeyStorage(#[from] sc_keystore::Error),
+	/// Bytes are not decodable when interpreted as hexadecimal string.
+	#[error("Invalid hex base data")]
+	HexDataConversion(#[from] hex::FromHexError),
+	/// Shortcut type to specify types on the fly, discouraged.
+	#[deprecated = "Use `Forwarded` with an error type instead."]
+	#[error("Other: {0}")]
 	Other(String),
 }
 
-/// Must be implemented explicitly because `derive_more` won't generate this
-/// case due to conflicting derive for `Other(String)`.
-impl std::convert::From<String> for Error {
-	fn from(s: String) -> Error {
-		Error::Input(s)
+impl std::convert::From<&str> for Error {
+	fn from(s: &str) -> Error {
+		Error::Input(s.to_string())
 	}
 }
 
-impl std::error::Error for Error {
-	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-		match self {
-			Error::Io(ref err) => Some(err),
-			Error::Cli(ref err) => Some(err),
-			Error::Service(ref err) => Some(err),
-			Error::Client(ref err) => Some(err),
-			Error::Input(_) => None,
-			Error::InvalidListenMultiaddress => None,
-			Error::Other(_) => None,
-		}
+impl std::convert::From<String> for Error {
+	fn from(s: String) -> Error {
+		Error::Input(s.to_string())
+	}
+}
+
+impl std::convert::From<crypto::PublicError> for Error {
+	fn from(e: crypto::PublicError) -> Error {
+		Error::InvalidUri(e)
 	}
 }

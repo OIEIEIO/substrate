@@ -1,18 +1,19 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! # Recovery Pallet
 //!
@@ -44,9 +45,9 @@
 //! the number of friends chosen. This deposit is returned in full when the account
 //! owner removes their recovery configuration.
 //!
-//! ### Recovery Lifecycle
+//! ### Recovery Life Cycle
 //!
-//! The intended lifecycle of a successful recovery takes the following steps:
+//! The intended life cycle of a successful recovery takes the following steps:
 //! 1. The account owner calls `create_recovery` to set up a recovery configuration
 //!    for their account.
 //! 2. At some later time, the account owner loses access to their account and wants
@@ -159,12 +160,9 @@ use codec::{Encode, Decode};
 
 use frame_support::{
 	decl_module, decl_event, decl_storage, decl_error, ensure,
-	Parameter, RuntimeDebug,
-	weights::{
-		GetDispatchInfo, PaysFee, DispatchClass, ClassifyDispatch, Weight, WeighData,
-		SimpleDispatchInfo,
-	},
-	traits::{Currency, ReservableCurrency, Get, OnReapAccount},
+	Parameter, RuntimeDebug, weights::GetDispatchInfo,
+	traits::{Currency, ReservableCurrency, Get, BalanceStatus},
+	dispatch::PostDispatchInfo,
 };
 use frame_system::{self as system, ensure_signed, ensure_root};
 
@@ -182,7 +180,7 @@ pub trait Trait: frame_system::Trait {
 	type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
 
 	/// The overarching call type.
-	type Call: Parameter + Dispatchable<Origin=Self::Origin> + GetDispatchInfo;
+	type Call: Parameter + Dispatchable<Origin=Self::Origin, PostInfo=PostDispatchInfo> + GetDispatchInfo;
 
 	/// The currency mechanism.
 	type Currency: ReservableCurrency<Self::AccountId>;
@@ -242,8 +240,9 @@ decl_storage! {
 	trait Store for Module<T: Trait> as Recovery {
 		/// The set of recoverable accounts and their recovery configuration.
 		pub Recoverable get(fn recovery_config):
-			map hasher(blake2_256) T::AccountId
+			map hasher(twox_64_concat) T::AccountId
 			=> Option<RecoveryConfig<T::BlockNumber, BalanceOf<T>, T::AccountId>>;
+
 		/// Active recovery attempts.
 		///
 		/// First account is the account to be recovered, and the second account
@@ -251,11 +250,12 @@ decl_storage! {
 		pub ActiveRecoveries get(fn active_recovery):
 			double_map hasher(twox_64_concat) T::AccountId, hasher(twox_64_concat) T::AccountId =>
 			Option<ActiveRecovery<T::BlockNumber, BalanceOf<T>, T::AccountId>>;
-		/// The final list of recovered accounts.
+
+		/// The list of allowed proxy accounts.
 		///
-		/// Map from the recovered account to the user who can access it.
-		pub Recovered get(fn recovered_account):
-			map hasher(blake2_256) T::AccountId => Option<T::AccountId>;
+		/// Map from the user who can access it to the recovered account.
+		pub Proxy get(fn proxy):
+			map hasher(blake2_128_concat) T::AccountId => Option<T::AccountId>;
 	}
 }
 
@@ -264,17 +264,21 @@ decl_event! {
 	pub enum Event<T> where
 		AccountId = <T as system::Trait>::AccountId,
 	{
-		/// A recovery process has been set up for an account
+		/// A recovery process has been set up for an \[account\].
 		RecoveryCreated(AccountId),
-		/// A recovery process has been initiated for account_1 by account_2
+		/// A recovery process has been initiated for lost account by rescuer account.
+		/// \[lost, rescuer\]
 		RecoveryInitiated(AccountId, AccountId),
-		/// A recovery process for account_1 by account_2 has been vouched for by account_3
+		/// A recovery process for lost account by rescuer account has been vouched for by sender.
+		/// \[lost, rescuer, sender\]
 		RecoveryVouched(AccountId, AccountId, AccountId),
-		/// A recovery process for account_1 by account_2 has been closed
+		/// A recovery process for lost account by rescuer account has been closed.
+		/// \[lost, rescuer\]
 		RecoveryClosed(AccountId, AccountId),
-		/// Account_1 has been successfully recovered by account_2
+		/// Lost account has been successfully recovered by rescuer account.
+		/// \[lost, rescuer\]
 		AccountRecovered(AccountId, AccountId),
-		/// A recovery process has been removed for an account
+		/// A recovery process has been removed for an \[account\].
 		RecoveryRemoved(AccountId),
 	}
 }
@@ -311,12 +315,26 @@ decl_error! {
 		StillActive,
 		/// There was an overflow in a calculation
 		Overflow,
+		/// This account is already set up for recovery
+		AlreadyProxy,
 	}
 }
 
 decl_module! {
 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
 		type Error = Error<T>;
+
+		/// The base amount of currency needed to reserve for creating a recovery configuration.
+		const ConfigDepositBase: BalanceOf<T> = T::ConfigDepositBase::get();
+
+		/// The amount of currency needed per additional user when creating a recovery configuration.
+		const FriendDepositFactor: BalanceOf<T> = T::FriendDepositFactor::get();
+
+		/// The maximum amount of friends allowed in a recovery configuration.
+		const MaxFriends: u16 = T::MaxFriends::get();
+
+		/// The base amount of currency needed to reserve for starting a recovery.
+		const RecoveryDeposit: BalanceOf<T> = T::RecoveryDeposit::get();
 
 		/// Deposit one of this module's events by using the default implementation.
 		fn deposit_event() = default;
@@ -331,18 +349,26 @@ decl_module! {
 		/// - `call`: The call you want to make with the recovered account.
 		///
 		/// # <weight>
-		/// - The weight of the `call`.
+		/// - The weight of the `call` + 10,000.
 		/// - One storage lookup to check account is recovered by `who`. O(1)
 		/// # </weight>
-		#[weight = <Passthrough<T::AccountId, <T as Trait>::Call>>::new()]
+		#[weight = (
+			call.get_dispatch_info().weight
+				.saturating_add(10_000)
+				 // AccountData for inner call origin accountdata.
+				.saturating_add(T::DbWeight::get().reads_writes(1, 1)),
+			call.get_dispatch_info().class
+		)]
 		fn as_recovered(origin,
 			account: T::AccountId,
 			call: Box<<T as Trait>::Call>
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			// Check `who` is allowed to make a call on behalf of `account`
-			ensure!(Self::recovered_account(&account) == Some(who), Error::<T>::NotAllowed);
+			let target = Self::proxy(&who).ok_or(Error::<T>::NotAllowed)?;
+			ensure!(&target == &account, Error::<T>::NotAllowed);
 			call.dispatch(frame_system::RawOrigin::Signed(account).into())
+				.map(|_| ()).map_err(|e| e.error)
 		}
 
 		/// Allow ROOT to bypass the recovery process and set an a rescuer account
@@ -358,11 +384,11 @@ decl_module! {
 		/// - One storage write O(1)
 		/// - One event
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(10_000)]
+		#[weight = 0]
 		fn set_recovered(origin, lost: T::AccountId, rescuer: T::AccountId) {
 			ensure_root(origin)?;
 			// Create the recovery storage item.
-			<Recovered<T>>::insert(&lost, &rescuer);
+			<Proxy<T>>::insert(&rescuer, &lost);
 			Self::deposit_event(RawEvent::AccountRecovered(lost, rescuer));
 		}
 
@@ -393,7 +419,7 @@ decl_module! {
 		///
 		/// Total Complexity: O(F + X)
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(100_000)]
+		#[weight = 100_000_000]
 		fn create_recovery(origin,
 			friends: Vec<T::AccountId>,
 			threshold: u16,
@@ -401,7 +427,7 @@ decl_module! {
 		) {
 			let who = ensure_signed(origin)?;
 			// Check account is not already set up for recovery
-			ensure!(!<Recoverable<T>>::exists(&who), Error::<T>::AlreadyRecoverable);
+			ensure!(!<Recoverable<T>>::contains_key(&who), Error::<T>::AlreadyRecoverable);
 			// Check user input is valid
 			ensure!(threshold >= 1, Error::<T>::ZeroThreshold);
 			ensure!(!friends.is_empty(), Error::<T>::NotEnoughFriends);
@@ -427,6 +453,7 @@ decl_module! {
 			};
 			// Create the recovery configuration storage item
 			<Recoverable<T>>::insert(&who, recovery_config);
+
 			Self::deposit_event(RawEvent::RecoveryCreated(who));
 		}
 
@@ -452,13 +479,13 @@ decl_module! {
 		///
 		/// Total Complexity: O(F + X)
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(100_000)]
+		#[weight = 100_000_000]
 		fn initiate_recovery(origin, account: T::AccountId) {
 			let who = ensure_signed(origin)?;
 			// Check that the account is recoverable
-			ensure!(<Recoverable<T>>::exists(&account), Error::<T>::NotRecoverable);
+			ensure!(<Recoverable<T>>::contains_key(&account), Error::<T>::NotRecoverable);
 			// Check that the recovery process has not already been started
-			ensure!(!<ActiveRecoveries<T>>::exists(&account, &who), Error::<T>::AlreadyStarted);
+			ensure!(!<ActiveRecoveries<T>>::contains_key(&account, &who), Error::<T>::AlreadyStarted);
 			// Take recovery deposit
 			let recovery_deposit = T::RecoveryDeposit::get();
 			T::Currency::reserve(&who, recovery_deposit)?;
@@ -498,7 +525,7 @@ decl_module! {
 		///
 		/// Total Complexity: O(F + logF + V + logV)
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(100_000)]
+		#[weight = 100_000_000]
 		fn vouch_recovery(origin, lost: T::AccountId, rescuer: T::AccountId) {
 			let who = ensure_signed(origin)?;
 			// Get the recovery configuration for the lost account.
@@ -537,13 +564,14 @@ decl_module! {
 		///
 		/// Total Complexity: O(F + V)
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(100_000)]
+		#[weight = 100_000_000]
 		fn claim_recovery(origin, account: T::AccountId) {
 			let who = ensure_signed(origin)?;
 			// Get the recovery configuration for the lost account
 			let recovery_config = Self::recovery_config(&account).ok_or(Error::<T>::NotRecoverable)?;
 			// Get the active recovery process for the rescuer
 			let active_recovery = Self::active_recovery(&account, &who).ok_or(Error::<T>::NotStarted)?;
+			ensure!(!Proxy::<T>::contains_key(&who), Error::<T>::AlreadyProxy);
 			// Make sure the delay period has passed
 			let current_block_number = <system::Module<T>>::block_number();
 			let recoverable_block_number = active_recovery.created
@@ -556,7 +584,8 @@ decl_module! {
 				Error::<T>::Threshold
 			);
 			// Create the recovery storage item
-			<Recovered<T>>::insert(&account, &who);
+			Proxy::<T>::insert(&who, &account);
+			system::Module::<T>::inc_ref(&who);
 			Self::deposit_event(RawEvent::AccountRecovered(account, who));
 		}
 
@@ -580,18 +609,18 @@ decl_module! {
 		///
 		/// Total Complexity: O(V + X)
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(30_000)]
+		#[weight = 30_000_000]
 		fn close_recovery(origin, rescuer: T::AccountId) {
 			let who = ensure_signed(origin)?;
 			// Take the active recovery process started by the rescuer for this account.
 			let active_recovery = <ActiveRecoveries<T>>::take(&who, &rescuer).ok_or(Error::<T>::NotStarted)?;
 			// Move the reserved funds from the rescuer to the rescued account.
 			// Acts like a slashing mechanism for those who try to maliciously recover accounts.
-			let _ = T::Currency::repatriate_reserved(&rescuer, &who, active_recovery.deposit);
+			let _ = T::Currency::repatriate_reserved(&rescuer, &who, active_recovery.deposit, BalanceStatus::Free);
 			Self::deposit_event(RawEvent::RecoveryClosed(who, rescuer));
 		}
 
-		/// Remove the recovery process for your account.
+		/// Remove the recovery process for your account. Recovered accounts are still accessible.
 		///
 		/// NOTE: The user must make sure to call `close_recovery` on all active
 		/// recovery attempts before calling this function else it will fail.
@@ -612,17 +641,38 @@ decl_module! {
 		///
 		/// Total Complexity: O(F + X)
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(30_000)]
+		#[weight = 30_000_000]
 		fn remove_recovery(origin) {
 			let who = ensure_signed(origin)?;
 			// Check there are no active recoveries
-			let mut active_recoveries = <ActiveRecoveries<T>>::iter_prefix(&who);
+			let mut active_recoveries = <ActiveRecoveries<T>>::iter_prefix_values(&who);
 			ensure!(active_recoveries.next().is_none(), Error::<T>::StillActive);
 			// Take the recovery configuration for this account.
 			let recovery_config = <Recoverable<T>>::take(&who).ok_or(Error::<T>::NotRecoverable)?;
+
 			// Unreserve the initial deposit for the recovery configuration.
 			T::Currency::unreserve(&who, recovery_config.deposit);
 			Self::deposit_event(RawEvent::RecoveryRemoved(who));
+		}
+
+		/// Cancel the ability to use `as_recovered` for `account`.
+		///
+		/// The dispatch origin for this call must be _Signed_ and registered to
+		/// be able to make calls on behalf of the recovered account.
+		///
+		/// Parameters:
+		/// - `account`: The recovered account you are able to call on-behalf-of.
+		///
+		/// # <weight>
+		/// - One storage mutation to check account is recovered by `who`. O(1)
+		/// # </weight>
+		#[weight = 0]
+		fn cancel_recovered(origin, account: T::AccountId) {
+			let who = ensure_signed(origin)?;
+			// Check `who` is allowed to make a call on behalf of `account`
+			ensure!(Self::proxy(&who) == Some(account), Error::<T>::NotAllowed);
+			Proxy::<T>::remove(&who);
+			system::Module::<T>::dec_ref(&who);
 		}
 	}
 }
@@ -636,35 +686,5 @@ impl<T: Trait> Module<T> {
 	/// Check that a user is a friend in the friends list.
 	fn is_friend(friends: &Vec<T::AccountId>, friend: &T::AccountId) -> bool {
 		friends.binary_search(&friend).is_ok()
-	}
-}
-
-impl<T: Trait> OnReapAccount<T::AccountId> for Module<T> {
-	/// Remove any existing access another account might have when the account is reaped.
-	/// This removes the final storage item managed by this module for any given account.
-	fn on_reap_account(who: &T::AccountId) {
-		<Recovered<T>>::remove(who);
-	}
-}
-
-/// Simple pass through for the weight functions.
-struct Passthrough<AccountId, Call>(sp_std::marker::PhantomData<(AccountId, Call)>);
-
-impl<AccountId, Call> Passthrough<AccountId, Call> {
-	fn new() -> Self { Self(Default::default()) }
-}
-impl<AccountId, Call: GetDispatchInfo> WeighData<(&AccountId, &Box<Call>)> for Passthrough<AccountId, Call> {
-	fn weigh_data(&self, (_, call): (&AccountId, &Box<Call>)) -> Weight {
-		call.get_dispatch_info().weight + 10_000
-	}
-}
-impl<AccountId, Call: GetDispatchInfo> ClassifyDispatch<(&AccountId, &Box<Call>)> for Passthrough<AccountId, Call> {
-	fn classify_dispatch(&self, (_, call): (&AccountId, &Box<Call>)) -> DispatchClass {
-		call.get_dispatch_info().class
-	}
-}
-impl<AccountId, Call: GetDispatchInfo> PaysFee<(&AccountId, &Box<Call>)> for Passthrough<AccountId, Call> {
-	fn pays_fee(&self, (_, call): (&AccountId, &Box<Call>)) -> bool {
-		call.get_dispatch_info().pays_fee
 	}
 }

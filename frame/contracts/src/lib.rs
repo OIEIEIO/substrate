@@ -64,15 +64,6 @@
 //! initialize the contract.
 //! * `call` - Makes a call to an account, optionally transferring some balance.
 //!
-//! ### Signed Extensions
-//!
-//! The contracts module defines the following extension:
-//!
-//!   - [`CheckBlockGasLimit`]: Ensures that the transaction does not exceeds the block gas limit.
-//!
-//! The signed extension needs to be added as signed extra to the transaction type to be used in the
-//! runtime.
-//!
 //! ## Usage
 //!
 //! The Contract module is a work in progress. The following examples show how this Contract module
@@ -87,47 +78,49 @@
 //! * [Balances](../pallet_balances/index.html)
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(feature = "runtime-benchmarks", recursion_limit="256")]
 
 #[macro_use]
 mod gas;
-
-mod account_db;
+mod storage;
 mod exec;
 mod wasm;
 mod rent;
+mod benchmarking;
+mod schedule;
+mod weight_info;
 
 #[cfg(test)]
 mod tests;
 
 use crate::exec::ExecutionContext;
-use crate::account_db::{AccountDb, DirectAccountDb};
 use crate::wasm::{WasmLoader, WasmVm};
 
 pub use crate::gas::{Gas, GasMeter};
-pub use crate::exec::{ExecResult, ExecReturnValue, ExecError, StatusCode};
+pub use crate::wasm::ReturnCode as RuntimeReturnCode;
+pub use crate::weight_info::WeightInfo;
+pub use crate::schedule::{Schedule, HostFnWeights, InstructionWeights};
 
-#[cfg(feature = "std")]
-use serde::{Serialize, Deserialize};
 use sp_core::crypto::UncheckedFrom;
 use sp_std::{prelude::*, marker::PhantomData, fmt::Debug};
 use codec::{Codec, Encode, Decode};
-use sp_io::hashing::blake2_256;
 use sp_runtime::{
-	traits::{Hash, StaticLookup, Zero, MaybeSerializeDeserialize, Member, SignedExtension},
-	transaction_validity::{
-		ValidTransaction, InvalidTransaction, TransactionValidity, TransactionValidityError,
+	traits::{
+		Hash, StaticLookup, Zero, MaybeSerializeDeserialize, Member, Convert, Saturating,
 	},
 	RuntimeDebug,
 };
-use frame_support::dispatch::{DispatchResult, Dispatchable};
 use frame_support::{
-	Parameter, decl_module, decl_event, decl_storage, decl_error, storage::child,
-	parameter_types, IsSubType,
-	weights::DispatchInfo,
+	decl_module, decl_event, decl_storage, decl_error, ensure,
+	parameter_types, storage::child::ChildInfo,
+	dispatch::{DispatchResult, DispatchResultWithPostInfo},
+	traits::{OnUnbalanced, Currency, Get, Time, Randomness},
 };
-use frame_support::traits::{OnFreeBalanceZero, OnUnbalanced, Currency, Get, Time, Randomness};
-use frame_system::{self as system, ensure_signed, RawOrigin, ensure_root};
-use sp_core::storage::well_known_keys::CHILD_STORAGE_KEY_PREFIX;
+use frame_system::{ensure_signed, ensure_root};
+use pallet_contracts_primitives::{
+	RentProjectionResult, GetStorageResult, ContractAccessError, ContractExecResult, ExecResult,
+};
+use frame_support::weights::Weight;
 
 pub type CodeHash<T> = <T as frame_system::Trait>::Hash;
 pub type TrieId = Vec<u8>;
@@ -137,12 +130,7 @@ pub trait ContractAddressFor<CodeHash, AccountId> {
 	fn contract_address_for(code_hash: &CodeHash, data: &[u8], origin: &AccountId) -> AccountId;
 }
 
-/// A function that returns the fee for dispatching a `Call`.
-pub trait ComputeDispatchFee<Call, Balance> {
-	fn compute_dispatch_fee(call: &Call) -> Balance;
-}
-
-/// Information for managing an acocunt and its sub trie abstraction.
+/// Information for managing an account and its sub trie abstraction.
 /// This is the required info to cache for an account
 #[derive(Encode, Decode, RuntimeDebug)]
 pub enum ContractInfo<T: Trait> {
@@ -211,8 +199,15 @@ pub type AliveContractInfo<T> =
 pub struct RawAliveContractInfo<CodeHash, Balance, BlockNumber> {
 	/// Unique ID for the subtree encoded as a bytes vector.
 	pub trie_id: TrieId,
-	/// The size of stored value in octet.
+	/// The total number of bytes used by this contract.
+	///
+	/// It is a sum of each key-value pair stored by this contract.
 	pub storage_size: u32,
+	/// The number of key-value pairs that have values of zero length.
+	/// The condition `empty_pair_count ≤ total_pair_count` always holds.
+	pub empty_pair_count: u32,
+	/// The total number of key-value pairs in storage of this contract.
+	pub total_pair_count: u32,
 	/// The code associated with a given account.
 	pub code_hash: CodeHash,
 	/// Pay rent at most up to this value.
@@ -225,15 +220,14 @@ pub struct RawAliveContractInfo<CodeHash, Balance, BlockNumber> {
 
 impl<CodeHash, Balance, BlockNumber> RawAliveContractInfo<CodeHash, Balance, BlockNumber> {
 	/// Associated child trie unique id is built from the hash part of the trie id.
-	pub fn child_trie_unique_id(&self) -> child::ChildInfo {
-		trie_unique_id(&self.trie_id[..])
+	pub fn child_trie_info(&self) -> ChildInfo {
+		child_trie_info(&self.trie_id[..])
 	}
 }
 
 /// Associated child trie unique id is built from the hash part of the trie id.
-pub(crate) fn trie_unique_id(trie_id: &[u8]) -> child::ChildInfo {
-	let start = CHILD_STORAGE_KEY_PREFIX.len() + b"default:".len();
-	child::ChildInfo::new_default(&trie_id[start ..])
+pub(crate) fn child_trie_info(trie_id: &[u8]) -> ChildInfo {
+	ChildInfo::new_default(trie_id)
 }
 
 pub type TombstoneContractInfo<T> =
@@ -253,7 +247,13 @@ where
 		let mut buf = Vec::new();
 		storage_root.using_encoded(|encoded| buf.extend_from_slice(encoded));
 		buf.extend_from_slice(code_hash.as_ref());
-		RawTombstoneContractInfo(Hasher::hash(&buf[..]), PhantomData)
+		RawTombstoneContractInfo(<Hasher as Hash>::hash(&buf[..]), PhantomData)
+	}
+}
+
+impl<T: Trait> From<AliveContractInfo<T>> for ContractInfo<T> {
+	fn from(alive_info: AliveContractInfo<T>) -> Self {
+		Self::Alive(alive_info)
 	}
 }
 
@@ -266,10 +266,6 @@ pub trait TrieIdGenerator<AccountId> {
 	///
 	/// The implementation must ensure every new trie id is unique: two consecutive calls with the
 	/// same parameter needs to return different trie id values.
-	///
-	/// Also, the implementation is responsible for ensuring that `TrieId` starts with
-	/// `:child_storage:`.
-	/// TODO: We want to change this, see https://github.com/paritytech/substrate/issues/2325
 	fn trie_id(account_id: &AccountId) -> TrieId;
 }
 
@@ -293,17 +289,12 @@ where
 		let mut buf = Vec::new();
 		buf.extend_from_slice(account_id.as_ref());
 		buf.extend_from_slice(&new_seed.to_le_bytes()[..]);
-
-		// TODO: see https://github.com/paritytech/substrate/issues/2325
-		CHILD_STORAGE_KEY_PREFIX.iter()
-			.chain(b"default:")
-			.chain(T::Hashing::hash(&buf[..]).as_ref().iter())
-			.cloned()
-			.collect()
+		T::Hashing::hash(&buf[..]).as_ref().into()
 	}
 }
 
-pub type BalanceOf<T> = <<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
+pub type BalanceOf<T> =
+	<<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
 pub type NegativeImbalanceOf<T> =
 	<<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::NegativeImbalance;
 
@@ -320,35 +311,18 @@ parameter_types! {
 	pub const DefaultRentDepositOffset: u32 = 1000;
 	/// A reasonable default value for [`Trait::SurchargeReward`].
 	pub const DefaultSurchargeReward: u32 = 150;
-	/// A reasonable default value for [`Trait::TransferFee`].
-	pub const DefaultTransferFee: u32 = 0;
-	/// A reasonable default value for [`Trait::InstantiationFee`].
-	pub const DefaultInstantiationFee: u32 = 0;
-	/// A reasonable default value for [`Trait::TransactionBaseFee`].
-	pub const DefaultTransactionBaseFee: u32 = 0;
-	/// A reasonable default value for [`Trait::TransactionByteFee`].
-	pub const DefaultTransactionByteFee: u32 = 0;
-	/// A reasonable default value for [`Trait::ContractFee`].
-	pub const DefaultContractFee: u32 = 21;
-	/// A reasonable default value for [`Trait::CallBaseFee`].
-	pub const DefaultCallBaseFee: u32 = 1000;
-	/// A reasonable default value for [`Trait::InstantiateBaseFee`].
-	pub const DefaultInstantiateBaseFee: u32 = 1000;
 	/// A reasonable default value for [`Trait::MaxDepth`].
 	pub const DefaultMaxDepth: u32 = 32;
 	/// A reasonable default value for [`Trait::MaxValueSize`].
 	pub const DefaultMaxValueSize: u32 = 16_384;
-	/// A reasonable default value for [`Trait::BlockGasLimit`].
-	pub const DefaultBlockGasLimit: u32 = 10_000_000;
 }
 
 pub trait Trait: frame_system::Trait {
-	type Currency: Currency<Self::AccountId>;
 	type Time: Time;
 	type Randomness: Randomness<Self::Hash>;
 
-	/// The outer call dispatch type.
-	type Call: Parameter + Dispatchable<Origin=<Self as frame_system::Trait>::Origin> + IsSubType<Module<Self>, Self>;
+	/// The currency in which fees are paid and contract balances are held.
+	type Currency: Currency<Self::AccountId>;
 
 	/// The overarching event type.
 	type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
@@ -356,17 +330,8 @@ pub trait Trait: frame_system::Trait {
 	/// A function type to get the contract address given the instantiator.
 	type DetermineContractAddress: ContractAddressFor<CodeHash<Self>, Self::AccountId>;
 
-	/// A function type that computes the fee for dispatching the given `Call`.
-	///
-	/// It is recommended (though not required) for this function to return a fee that would be
-	/// taken by the Executive module for regular dispatch.
-	type ComputeDispatchFee: ComputeDispatchFee<<Self as Trait>::Call, BalanceOf<Self>>;
-
 	/// trie id generator
 	type TrieIdGenerator: TrieIdGenerator<Self::AccountId>;
-
-	/// Handler for the unbalanced reduction when making a gas payment.
-	type GasPayment: OnUnbalanced<NegativeImbalanceOf<Self>>;
 
 	/// Handler for rent payments.
 	type RentPayment: OnUnbalanced<NegativeImbalanceOf<Self>>;
@@ -380,8 +345,11 @@ pub trait Trait: frame_system::Trait {
 	/// The minimum amount required to generate a tombstone.
 	type TombstoneDeposit: Get<BalanceOf<Self>>;
 
-	/// Size of a contract at the time of instantiation. This is a simple way to ensure
-	/// that empty contracts eventually gets deleted.
+	/// A size offset for an contract. A just created account with untouched storage will have that
+	/// much of storage from the perspective of the state rent.
+	///
+	/// This is a simple way to ensure that contracts with empty storage eventually get deleted by
+	/// making them pay rent. This creates an incentive to remove them early in order to save rent.
 	type StorageSizeOffset: Get<u32>;
 
 	/// Price of a byte of storage per one block interval. Should be greater than 0.
@@ -400,35 +368,19 @@ pub trait Trait: frame_system::Trait {
 	/// to removal of a contract.
 	type SurchargeReward: Get<BalanceOf<Self>>;
 
-	/// The fee required to make a transfer.
-	type TransferFee: Get<BalanceOf<Self>>;
-
-	/// The fee required to create an account.
-	type CreationFee: Get<BalanceOf<Self>>;
-
-	/// The fee to be paid for making a transaction; the base.
-	type TransactionBaseFee: Get<BalanceOf<Self>>;
-
-	/// The fee to be paid for making a transaction; the per-byte portion.
-	type TransactionByteFee: Get<BalanceOf<Self>>;
-
-	/// The fee required to instantiate a contract instance.
-	type ContractFee: Get<BalanceOf<Self>>;
-
-	/// The base fee charged for calling into a contract.
-	type CallBaseFee: Get<Gas>;
-
-	/// The base fee charged for instantiating a contract.
-	type InstantiateBaseFee: Get<Gas>;
-
 	/// The maximum nesting level of a call/instantiate stack.
 	type MaxDepth: Get<u32>;
 
-	/// The maximum size of a storage value in bytes.
+	/// The maximum size of a storage value and event payload in bytes.
 	type MaxValueSize: Get<u32>;
 
-	/// The maximum amount of gas that could be expended per block.
-	type BlockGasLimit: Get<Gas>;
+	/// Used to answer contracts's queries regarding the current weight price. This is **not**
+	/// used to calculate the actual fee and is only for informational purposes.
+	type WeightPrice: Convert<Weight, BalanceOf<Self>>;
+
+	/// Describes the weights of the dispatchables of this module and is also used to
+	/// construct a default cost schedule.
+	type WeightInfo: WeightInfo;
 }
 
 /// Simple contract address determiner.
@@ -437,8 +389,8 @@ pub trait Trait: frame_system::Trait {
 /// and the account id that requested the account creation.
 ///
 /// Formula: `blake2_256(blake2_256(code) + blake2_256(data) + origin)`
-pub struct SimpleAddressDeterminator<T: Trait>(PhantomData<T>);
-impl<T: Trait> ContractAddressFor<CodeHash<T>, T::AccountId> for SimpleAddressDeterminator<T>
+pub struct SimpleAddressDeterminer<T: Trait>(PhantomData<T>);
+impl<T: Trait> ContractAddressFor<CodeHash<T>, T::AccountId> for SimpleAddressDeterminer<T>
 where
 	T::AccountId: UncheckedFrom<T::Hash> + AsRef<[u8]>
 {
@@ -451,19 +403,6 @@ where
 		buf.extend_from_slice(origin.as_ref());
 
 		UncheckedFrom::unchecked_from(T::Hashing::hash(&buf[..]))
-	}
-}
-
-/// The default dispatch fee computor computes the fee in the same way that
-/// the implementation of `ChargeTransactionPayment` for the Balances module does. Note that this only takes a fixed
-/// fee based on size. Unlike the balances module, weight-fee is applied.
-pub struct DefaultDispatchFeeComputor<T: Trait>(PhantomData<T>);
-impl<T: Trait> ComputeDispatchFee<<T as Trait>::Call, BalanceOf<T>> for DefaultDispatchFeeComputor<T> {
-	fn compute_dispatch_fee(call: &<T as Trait>::Call) -> BalanceOf<T> {
-		let encoded_len = call.using_encoded(|encoded| encoded.len() as u32);
-		let base_fee = T::TransactionBaseFee::get();
-		let byte_fee = T::TransactionByteFee::get();
-		base_fee + byte_fee * encoded_len.into()
 	}
 }
 
@@ -481,7 +420,41 @@ decl_error! {
 		/// Tombstones don't match.
 		InvalidTombstone,
 		/// An origin TrieId written in the current block.
-		InvalidContractOrigin
+		InvalidContractOrigin,
+		/// The executed contract exhausted its gas limit.
+		OutOfGas,
+		/// The output buffer supplied to a contract API call was too small.
+		OutputBufferTooSmall,
+		/// Performing the requested transfer would have brought the contract below
+		/// the subsistence threshold. No transfer is allowed to do this in order to allow
+		/// for a tombstone to be created. Use `seal_terminate` to remove a contract without
+		/// leaving a tombstone behind.
+		BelowSubsistenceThreshold,
+		/// The newly created contract is below the subsistence threshold after executing
+		/// its contructor. No contracts are allowed to exist below that threshold.
+		NewContractNotFunded,
+		/// Performing the requested transfer failed for a reason originating in the
+		/// chosen currency implementation of the runtime. Most probably the balance is
+		/// too low or locks are placed on it.
+		TransferFailed,
+		/// Performing a call was denied because the calling depth reached the limit
+		/// of what is specified in the schedule.
+		MaxCallDepthReached,
+		/// The contract that was called is either no contract at all (a plain account)
+		/// or is a tombstone.
+		NotCallable,
+		/// The code supplied to `put_code` exceeds the limit specified in the current schedule.
+		CodeTooLarge,
+		/// No code could be found at the supplied code hash.
+		CodeNotFound,
+		/// A buffer outside of sandbox memory was passed to a contract API function.
+		OutOfBounds,
+		/// Input passed to a contract API function failed to decode as expected type.
+		DecodingFailed,
+		/// Contract trapped during execution.
+		ContractTrapped,
+		/// The size defined in `T::MaxValueSize` was exceeded.
+		ValueTooLarge,
 	}
 }
 
@@ -499,8 +472,12 @@ decl_module! {
 		/// The minimum amount required to generate a tombstone.
 		const TombstoneDeposit: BalanceOf<T> = T::TombstoneDeposit::get();
 
-		/// Size of a contract at the time of instantiaion. This is a simple way to ensure that
-		/// empty contracts eventually gets deleted.
+		/// A size offset for an contract. A just created account with untouched storage will have that
+		/// much of storage from the perspective of the state rent.
+		///
+		/// This is a simple way to ensure that contracts with empty storage eventually get deleted
+		/// by making them pay rent. This creates an incentive to remove them early in order to save
+		/// rent.
 		const StorageSizeOffset: u32 = T::StorageSizeOffset::get();
 
 		/// Price of a byte of storage per one block interval. Should be greater than 0.
@@ -519,30 +496,6 @@ decl_module! {
 		/// to removal of a contract.
 		const SurchargeReward: BalanceOf<T> = T::SurchargeReward::get();
 
-		/// The fee required to make a transfer.
-		const TransferFee: BalanceOf<T> = T::TransferFee::get();
-
-		/// The fee required to create an account.
-		const CreationFee: BalanceOf<T> = T::CreationFee::get();
-
-		/// The fee to be paid for making a transaction; the base.
-		const TransactionBaseFee: BalanceOf<T> = T::TransactionBaseFee::get();
-
-		/// The fee to be paid for making a transaction; the per-byte portion.
-		const TransactionByteFee: BalanceOf<T> = T::TransactionByteFee::get();
-
-		/// The fee required to instantiate a contract instance. A reasonable default value
-		/// is 21.
-		const ContractFee: BalanceOf<T> = T::ContractFee::get();
-
-		/// The base fee charged for calling into a contract. A reasonable default
-		/// value is 135.
-		const CallBaseFee: Gas = T::CallBaseFee::get();
-
-		/// The base fee charged for instantiating a contract. A reasonable default value
-		/// is 175.
-		const InstantiateBaseFee: Gas = T::InstantiateBaseFee::get();
-
 		/// The maximum nesting level of a call/instantiate stack. A reasonable default
 		/// value is 100.
 		const MaxDepth: u32 = T::MaxDepth::get();
@@ -550,16 +503,13 @@ decl_module! {
 		/// The maximum size of a storage value in bytes. A reasonable default is 16 KiB.
 		const MaxValueSize: u32 = T::MaxValueSize::get();
 
-		/// The maximum amount of gas that could be expended per block. A reasonable
-		/// default value is 10_000_000.
-		const BlockGasLimit: Gas = T::BlockGasLimit::get();
-
 		fn deposit_event() = default;
 
 		/// Updates the schedule for metering contracts.
 		///
 		/// The schedule must have a greater version than the stored schedule.
-		pub fn update_schedule(origin, schedule: Schedule) -> DispatchResult {
+		#[weight = T::WeightInfo::update_schedule()]
+		pub fn update_schedule(origin, schedule: Schedule<T>) -> DispatchResult {
 			ensure_root(origin)?;
 			if <Module<T>>::current_schedule().version >= schedule.version {
 				Err(Error::<T>::InvalidScheduleVersion)?
@@ -573,23 +523,18 @@ decl_module! {
 
 		/// Stores the given binary Wasm code into the chain's storage and returns its `codehash`.
 		/// You can instantiate contracts only with stored code.
+		#[weight = T::WeightInfo::put_code(code.len() as u32 / 1024)]
 		pub fn put_code(
 			origin,
-			#[compact] gas_limit: Gas,
 			code: Vec<u8>
 		) -> DispatchResult {
-			let origin = ensure_signed(origin)?;
-
-			let (mut gas_meter, imbalance) = gas::buy_gas::<T>(&origin, gas_limit)?;
-
+			ensure_signed(origin)?;
 			let schedule = <Module<T>>::current_schedule();
-			let result = wasm::save_code::<T>(code, &mut gas_meter, &schedule);
+			ensure!(code.len() as u32 <= schedule.max_code_size, Error::<T>::CodeTooLarge);
+			let result = wasm::save_code::<T>(code, &schedule);
 			if let Ok(code_hash) = result {
 				Self::deposit_event(RawEvent::CodeStored(code_hash));
 			}
-
-			gas::refund_unused_gas::<T>(&origin, gas_meter, imbalance);
-
 			result.map(|_| ()).map_err(Into::into)
 		}
 
@@ -600,19 +545,22 @@ decl_module! {
 		/// * If the account is a regular account, any value will be transferred.
 		/// * If no account exists and the call value is not less than `existential_deposit`,
 		/// a regular account will be created and any value will be transferred.
+		#[weight = T::WeightInfo::call().saturating_add(*gas_limit)]
 		pub fn call(
 			origin,
 			dest: <T::Lookup as StaticLookup>::Source,
 			#[compact] value: BalanceOf<T>,
 			#[compact] gas_limit: Gas,
 			data: Vec<u8>
-		) -> DispatchResult {
+		) -> DispatchResultWithPostInfo {
 			let origin = ensure_signed(origin)?;
 			let dest = T::Lookup::lookup(dest)?;
+			let mut gas_meter = GasMeter::new(gas_limit);
 
-			Self::bare_call(origin, dest, value, gas_limit, data)
-				.map(|_| ())
-				.map_err(|e| e.reason.into())
+			let result = Self::execute_wasm(origin, &mut gas_meter, |ctx, gas_meter| {
+				ctx.call(dest, value, gas_meter, data)
+			});
+			gas_meter.into_dispatch_result(result)
 		}
 
 		/// Instantiates a new contract from the `codehash` generated by `put_code`, optionally transferring some balance.
@@ -625,21 +573,22 @@ decl_module! {
 		///   after the execution is saved as the `code` of the account. That code will be invoked
 		///   upon any call received by this account.
 		/// - The contract is initialized.
+		#[weight = T::WeightInfo::instantiate(data.len() as u32 / 1024).saturating_add(*gas_limit)]
 		pub fn instantiate(
 			origin,
 			#[compact] endowment: BalanceOf<T>,
 			#[compact] gas_limit: Gas,
 			code_hash: CodeHash<T>,
 			data: Vec<u8>
-		) -> DispatchResult {
+		) -> DispatchResultWithPostInfo {
 			let origin = ensure_signed(origin)?;
+			let mut gas_meter = GasMeter::new(gas_limit);
 
-			Self::execute_wasm(origin, gas_limit, |ctx, gas_meter| {
+			let result = Self::execute_wasm(origin, &mut gas_meter, |ctx, gas_meter| {
 				ctx.instantiate(endowment, gas_meter, &code_hash, data)
 					.map(|(_address, output)| output)
-			})
-			.map(|_| ())
-			.map_err(|e| e.reason.into())
+			});
+			gas_meter.into_dispatch_result(result)
 		}
 
 		/// Allows block producers to claim a small reward for evicting a contract. If a block producer
@@ -647,6 +596,7 @@ decl_module! {
 		///
 		/// If contract is not evicted as a result of this call, no actions are taken and
 		/// the sender is not eligible for the reward.
+		#[weight = T::WeightInfo::claim_surcharge()]
 		fn claim_surcharge(origin, dest: T::AccountId, aux_sender: Option<T::AccountId>) {
 			let origin = origin.into();
 			let (signed, rewarded) = match (origin, aux_sender) {
@@ -673,19 +623,7 @@ decl_module! {
 				T::Currency::deposit_into_existing(&rewarded, T::SurchargeReward::get())?;
 			}
 		}
-
-		fn on_finalize() {
-			GasSpent::kill();
-		}
 	}
-}
-
-/// The possible errors that can happen querying the storage of a contract.
-pub enum GetStorageError {
-	/// The given address doesn't point on a contract.
-	ContractDoesntExist,
-	/// The specified contract is a tombstone and thus cannot have any storage.
-	IsTombstone,
 }
 
 /// Public APIs provided by the contracts module.
@@ -694,197 +632,61 @@ impl<T: Trait> Module<T> {
 	///
 	/// This function is similar to `Self::call`, but doesn't perform any address lookups and better
 	/// suitable for calling directly from Rust.
+	///
+	/// It returns the exection result and the amount of used weight.
 	pub fn bare_call(
 		origin: T::AccountId,
 		dest: T::AccountId,
 		value: BalanceOf<T>,
 		gas_limit: Gas,
 		input_data: Vec<u8>,
-	) -> ExecResult {
-		Self::execute_wasm(origin, gas_limit, |ctx, gas_meter| {
+	) -> ContractExecResult {
+		let mut gas_meter = GasMeter::new(gas_limit);
+		let exec_result = Self::execute_wasm(origin, &mut gas_meter, |ctx, gas_meter| {
 			ctx.call(dest, value, gas_meter, input_data)
-		})
+		});
+		let gas_consumed = gas_meter.gas_spent();
+		ContractExecResult {
+			exec_result,
+			gas_consumed,
+		}
 	}
 
 	/// Query storage of a specified contract under a specified key.
-	pub fn get_storage(
-		address: T::AccountId,
-		key: [u8; 32],
-	) -> sp_std::result::Result<Option<Vec<u8>>, GetStorageError> {
-		let contract_info = <ContractInfoOf<T>>::get(&address)
-			.ok_or(GetStorageError::ContractDoesntExist)?
+	pub fn get_storage(address: T::AccountId, key: [u8; 32]) -> GetStorageResult {
+		let contract_info = ContractInfoOf::<T>::get(&address)
+			.ok_or(ContractAccessError::DoesntExist)?
 			.get_alive()
-			.ok_or(GetStorageError::IsTombstone)?;
+			.ok_or(ContractAccessError::IsTombstone)?;
 
-		let maybe_value = AccountDb::<T>::get_storage(
-			&DirectAccountDb,
-			&address,
-			Some(&contract_info.trie_id),
-			&key,
-		);
+		let maybe_value = storage::read_contract_storage(&contract_info.trie_id, &key);
 		Ok(maybe_value)
+	}
+
+	pub fn rent_projection(address: T::AccountId) -> RentProjectionResult<T::BlockNumber> {
+		rent::compute_rent_projection::<T>(&address)
+	}
+
+	/// Put code for benchmarks which does not check or instrument the code.
+	#[cfg(feature = "runtime-benchmarks")]
+	pub fn put_code_raw(code: Vec<u8>) -> DispatchResult {
+		let schedule = <Module<T>>::current_schedule();
+		let result = wasm::save_code_raw::<T>(code, &schedule);
+		result.map(|_| ()).map_err(Into::into)
 	}
 }
 
 impl<T: Trait> Module<T> {
 	fn execute_wasm(
 		origin: T::AccountId,
-		gas_limit: Gas,
-		func: impl FnOnce(&mut ExecutionContext<T, WasmVm, WasmLoader>, &mut GasMeter<T>) -> ExecResult
+		gas_meter: &mut GasMeter<T>,
+		func: impl FnOnce(&mut ExecutionContext<T, WasmVm<T>, WasmLoader<T>>, &mut GasMeter<T>) -> ExecResult,
 	) -> ExecResult {
-		// Pay for the gas upfront.
-		//
-		// NOTE: it is very important to avoid any state changes before
-		// paying for the gas.
-		let (mut gas_meter, imbalance) =
-			try_or_exec_error!(
-				gas::buy_gas::<T>(&origin, gas_limit),
-				// We don't have a spare buffer here in the first place, so create a new empty one.
-				Vec::new()
-			);
-
 		let cfg = Config::preload();
 		let vm = WasmVm::new(&cfg.schedule);
 		let loader = WasmLoader::new(&cfg.schedule);
-		let mut ctx = ExecutionContext::top_level(origin.clone(), &cfg, &vm, &loader);
-
-		let result = func(&mut ctx, &mut gas_meter);
-
-		if result.as_ref().map(|output| output.is_success()).unwrap_or(false) {
-			// Commit all changes that made it thus far into the persistent storage.
-			DirectAccountDb.commit(ctx.overlay.into_change_set());
-		}
-
-		// Refund cost of the unused gas.
-		//
-		// NOTE: This should go after the commit to the storage, since the storage changes
-		// can alter the balance of the caller.
-		gas::refund_unused_gas::<T>(&origin, gas_meter, imbalance);
-
-		// Execute deferred actions.
-		ctx.deferred.into_iter().for_each(|deferred| {
-			use self::exec::DeferredAction::*;
-			match deferred {
-				DepositEvent {
-					topics,
-					event,
-				} => <frame_system::Module<T>>::deposit_event_indexed(
-					&*topics,
-					<T as Trait>::Event::from(event).into(),
-				),
-				DispatchRuntimeCall {
-					origin: who,
-					call,
-				} => {
-					let result = call.dispatch(RawOrigin::Signed(who.clone()).into());
-					Self::deposit_event(RawEvent::Dispatched(who, result.is_ok()));
-				}
-				RestoreTo {
-					donor,
-					dest,
-					code_hash,
-					rent_allowance,
-					delta,
-				} => {
-					let result = Self::restore_to(
-						donor.clone(), dest.clone(), code_hash.clone(), rent_allowance.clone(), delta
-					);
-					Self::deposit_event(
-						RawEvent::Restored(donor, dest, code_hash, rent_allowance, result.is_ok())
-					);
-				}
-			}
-		});
-
-		result
-	}
-
-	fn restore_to(
-		origin: T::AccountId,
-		dest: T::AccountId,
-		code_hash: CodeHash<T>,
-		rent_allowance: BalanceOf<T>,
-		delta: Vec<exec::StorageKey>
-	) -> DispatchResult {
-		let mut origin_contract = <ContractInfoOf<T>>::get(&origin)
-			.and_then(|c| c.get_alive())
-			.ok_or(Error::<T>::InvalidSourceContract)?;
-
-		let current_block = <frame_system::Module<T>>::block_number();
-
-		if origin_contract.last_write == Some(current_block) {
-			Err(Error::<T>::InvalidContractOrigin)?
-		}
-
-		let dest_tombstone = <ContractInfoOf<T>>::get(&dest)
-			.and_then(|c| c.get_tombstone())
-			.ok_or(Error::<T>::InvalidDestinationContract)?;
-
-		let last_write = if !delta.is_empty() {
-			Some(current_block)
-		} else {
-			origin_contract.last_write
-		};
-
-		let key_values_taken = delta.iter()
-			.filter_map(|key| {
-				child::get_raw(
-					&origin_contract.trie_id,
-					origin_contract.child_trie_unique_id(),
-					&blake2_256(key),
-				).map(|value| {
-					child::kill(
-						&origin_contract.trie_id,
-						origin_contract.child_trie_unique_id(),
-						&blake2_256(key),
-					);
-
-					(key, value)
-				})
-			})
-			.collect::<Vec<_>>();
-
-		let tombstone = <TombstoneContractInfo<T>>::new(
-			// This operation is cheap enough because last_write (delta not included)
-			// is not this block as it has been checked earlier.
-			&child::child_root(
-				&origin_contract.trie_id,
-			)[..],
-			code_hash,
-		);
-
-		if tombstone != dest_tombstone {
-			for (key, value) in key_values_taken {
-				child::put_raw(
-					&origin_contract.trie_id,
-					origin_contract.child_trie_unique_id(),
-					&blake2_256(key),
-					&value,
-				);
-			}
-
-			return Err(Error::<T>::InvalidTombstone.into());
-		}
-
-		origin_contract.storage_size -= key_values_taken.iter()
-			.map(|(_, value)| value.len() as u32)
-			.sum::<u32>();
-
-		<ContractInfoOf<T>>::remove(&origin);
-		<ContractInfoOf<T>>::insert(&dest, ContractInfo::Alive(RawAliveContractInfo {
-			trie_id: origin_contract.trie_id,
-			storage_size: origin_contract.storage_size,
-			code_hash,
-			rent_allowance,
-			deduct_block: current_block,
-			last_write,
-		}));
-
-		let origin_free_balance = T::Currency::free_balance(&origin);
-		T::Currency::make_free_balance_be(&origin, <BalanceOf<T>>::zero());
-		T::Currency::deposit_creating(&dest, origin_free_balance);
-
-		Ok(())
+		let mut ctx = ExecutionContext::top_level(origin, &cfg, &vm, &loader);
+		func(&mut ctx, gas_meter)
 	}
 }
 
@@ -895,13 +697,11 @@ decl_event! {
 		<T as frame_system::Trait>::AccountId,
 		<T as frame_system::Trait>::Hash
 	{
-		/// Transfer happened `from` to `to` with given `value` as part of a `call` or `instantiate`.
-		Transfer(AccountId, AccountId, Balance),
-
-		/// Contract deployed by address at the specified address.
+		/// Contract deployed by address at the specified address. \[owner, contract\]
 		Instantiated(AccountId, AccountId),
 
 		/// Contract has been evicted and is now in tombstone state.
+		/// \[contract, tombstone\]
 		///
 		/// # Params
 		///
@@ -909,7 +709,8 @@ decl_event! {
 		/// - `tombstone`: `bool`: True if the evicted contract left behind a tombstone.
 		Evicted(AccountId, bool),
 
-		/// Restoration for a contract has been initiated.
+		/// Restoration for a contract has been successful.
+		/// \[donor, dest, code_hash, rent_allowance\]
 		///
 		/// # Params
 		///
@@ -917,48 +718,35 @@ decl_event! {
 		/// - `dest`: `AccountId`: Account ID of the restored contract
 		/// - `code_hash`: `Hash`: Code hash of the restored contract
 		/// - `rent_allowance: `Balance`: Rent allowance of the restored contract
-		/// - `success`: `bool`: True if the restoration was successful
-		Restored(AccountId, AccountId, Hash, Balance, bool),
+		Restored(AccountId, AccountId, Hash, Balance),
 
 		/// Code with the specified hash has been stored.
+		/// \[code_hash\]
 		CodeStored(Hash),
 
-		/// Triggered when the current schedule is updated.
+		/// Triggered when the current \[schedule\] is updated.
 		ScheduleUpdated(u32),
 
-		/// A call was dispatched from the given account. The bool signals whether it was
-		/// successful execution or not.
-		Dispatched(AccountId, bool),
-
 		/// An event deposited upon execution of a contract from the account.
+		/// \[account, data\]
 		ContractExecution(AccountId, Vec<u8>),
 	}
 }
 
 decl_storage! {
-	trait Store for Module<T: Trait> as Contract {
-		/// Gas spent so far in this block.
-		GasSpent get(fn gas_spent): Gas;
+	trait Store for Module<T: Trait> as Contracts {
 		/// Current cost schedule for contracts.
-		CurrentSchedule get(fn current_schedule) config(): Schedule = Schedule::default();
+		CurrentSchedule get(fn current_schedule) config(): Schedule<T> = Default::default();
 		/// A mapping from an original code hash to the original code, untouched by instrumentation.
-		pub PristineCode: map hasher(blake2_256) CodeHash<T> => Option<Vec<u8>>;
+		pub PristineCode: map hasher(identity) CodeHash<T> => Option<Vec<u8>>;
 		/// A mapping between an original code hash and instrumented wasm code, ready for execution.
-		pub CodeStorage: map hasher(blake2_256) CodeHash<T> => Option<wasm::PrefabWasmModule>;
+		pub CodeStorage: map hasher(identity) CodeHash<T> => Option<wasm::PrefabWasmModule>;
 		/// The subtrie counter.
 		pub AccountCounter: u64 = 0;
 		/// The code associated with a given account.
-		pub ContractInfoOf: map hasher(blake2_256) T::AccountId => Option<ContractInfo<T>>;
-		/// The price of one unit of gas.
-		GasPrice get(fn gas_price) config(): BalanceOf<T> = 1.into();
-	}
-}
-
-impl<T: Trait> OnFreeBalanceZero<T::AccountId> for Module<T> {
-	fn on_free_balance_zero(who: &T::AccountId) {
-		if let Some(ContractInfo::Alive(info)) = <ContractInfoOf<T>>::take(who) {
-			child::kill_storage(&info.trie_id, info.child_trie_unique_id());
-		}
+		///
+		/// TWOX-NOTE: SAFE since `AccountId` is a secure hash.
+		pub ContractInfoOf: map hasher(twox_64_concat) T::AccountId => Option<ContractInfo<T>>;
 	}
 }
 
@@ -967,14 +755,11 @@ impl<T: Trait> OnFreeBalanceZero<T::AccountId> for Module<T> {
 /// We assume that these values can't be changed in the
 /// course of transaction execution.
 pub struct Config<T: Trait> {
-	pub schedule: Schedule,
+	pub schedule: Schedule<T>,
 	pub existential_deposit: BalanceOf<T>,
 	pub tombstone_deposit: BalanceOf<T>,
 	pub max_depth: u32,
 	pub max_value_size: u32,
-	pub contract_account_instantiate_fee: BalanceOf<T>,
-	pub account_create_fee: BalanceOf<T>,
-	pub transfer_fee: BalanceOf<T>,
 }
 
 impl<T: Trait> Config<T> {
@@ -985,162 +770,25 @@ impl<T: Trait> Config<T> {
 			tombstone_deposit: T::TombstoneDeposit::get(),
 			max_depth: T::MaxDepth::get(),
 			max_value_size: T::MaxValueSize::get(),
-			contract_account_instantiate_fee: T::ContractFee::get(),
-			account_create_fee: T::CreationFee::get(),
-			transfer_fee: T::TransferFee::get(),
 		}
 	}
-}
 
-/// Definition of the cost schedule and other parameterizations for wasm vm.
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-#[derive(Clone, Encode, Decode, PartialEq, Eq, RuntimeDebug)]
-pub struct Schedule {
-	/// Version of the schedule.
-	pub version: u32,
-
-	/// Cost of putting a byte of code into storage.
-	pub put_code_per_byte_cost: Gas,
-
-	/// Gas cost of a growing memory by single page.
-	pub grow_mem_cost: Gas,
-
-	/// Gas cost of a regular operation.
-	pub regular_op_cost: Gas,
-
-	/// Gas cost per one byte returned.
-	pub return_data_per_byte_cost: Gas,
-
-	/// Gas cost to deposit an event; the per-byte portion.
-	pub event_data_per_byte_cost: Gas,
-
-	/// Gas cost to deposit an event; the cost per topic.
-	pub event_per_topic_cost: Gas,
-
-	/// Gas cost to deposit an event; the base.
-	pub event_base_cost: Gas,
-
-	/// Base gas cost to call into a contract.
-	pub call_base_cost: Gas,
-
-	/// Base gas cost to instantiate a contract.
-	pub instantiate_base_cost: Gas,
-
-	/// Gas cost per one byte read from the sandbox memory.
-	pub sandbox_data_read_cost: Gas,
-
-	/// Gas cost per one byte written to the sandbox memory.
-	pub sandbox_data_write_cost: Gas,
-
-	/// The maximum number of topics supported by an event.
-	pub max_event_topics: u32,
-
-	/// Maximum allowed stack height.
+	/// Subsistence threshold is the extension of the minimum balance (aka existential deposit) by the
+	/// tombstone deposit, required for leaving a tombstone.
 	///
-	/// See https://wiki.parity.io/WebAssembly-StackHeight to find out
-	/// how the stack frame cost is calculated.
-	pub max_stack_height: u32,
-
-	/// Maximum number of memory pages allowed for a contract.
-	pub max_memory_pages: u32,
-
-	/// Maximum allowed size of a declared table.
-	pub max_table_size: u32,
-
-	/// Whether the `ext_println` function is allowed to be used contracts.
-	/// MUST only be enabled for `dev` chains, NOT for production chains
-	pub enable_println: bool,
-
-	/// The maximum length of a subject used for PRNG generation.
-	pub max_subject_len: u32,
-}
-
-impl Default for Schedule {
-	fn default() -> Schedule {
-		Schedule {
-			version: 0,
-			put_code_per_byte_cost: 1,
-			grow_mem_cost: 1,
-			regular_op_cost: 1,
-			return_data_per_byte_cost: 1,
-			event_data_per_byte_cost: 1,
-			event_per_topic_cost: 1,
-			event_base_cost: 1,
-			call_base_cost: 135,
-			instantiate_base_cost: 175,
-			sandbox_data_read_cost: 1,
-			sandbox_data_write_cost: 1,
-			max_event_topics: 4,
-			max_stack_height: 64 * 1024,
-			max_memory_pages: 16,
-			max_table_size: 16 * 1024,
-			enable_println: false,
-			max_subject_len: 32,
-		}
-	}
-}
-
-/// `SignedExtension` that checks if a transaction would exhausts the block gas limit.
-#[derive(Encode, Decode, Clone, Eq, PartialEq)]
-pub struct CheckBlockGasLimit<T: Trait + Send + Sync>(PhantomData<T>);
-
-impl<T: Trait + Send + Sync> Default for CheckBlockGasLimit<T> {
-	fn default() -> Self {
-		Self(PhantomData)
-	}
-}
-
-impl<T: Trait + Send + Sync> sp_std::fmt::Debug for CheckBlockGasLimit<T> {
-	#[cfg(feature = "std")]
-	fn fmt(&self, f: &mut sp_std::fmt::Formatter) -> sp_std::fmt::Result {
-		write!(f, "CheckBlockGasLimit")
+	/// Rent or any contract initiated balance transfer mechanism cannot make the balance lower
+	/// than the subsistence threshold in order to guarantee that a tombstone is created.
+	///
+	/// The only way to completely kill a contract without a tombstone is calling `seal_terminate`.
+	pub fn subsistence_threshold(&self) -> BalanceOf<T> {
+		self.existential_deposit.saturating_add(self.tombstone_deposit)
 	}
 
-	#[cfg(not(feature = "std"))]
-	fn fmt(&self, _: &mut sp_std::fmt::Formatter) -> sp_std::fmt::Result {
-		Ok(())
-	}
-}
-
-impl<T: Trait + Send + Sync> SignedExtension for CheckBlockGasLimit<T> {
-	type AccountId = T::AccountId;
-	type Call = <T as Trait>::Call;
-	type AdditionalSigned = ();
-	type DispatchInfo = DispatchInfo;
-	type Pre = ();
-
-	fn additional_signed(&self) -> sp_std::result::Result<(), TransactionValidityError> { Ok(()) }
-
-	fn validate(
-		&self,
-		_: &Self::AccountId,
-		call: &Self::Call,
-		_: Self::DispatchInfo,
-		_: usize,
-	) -> TransactionValidity {
-		let call = match call.is_sub_type() {
-			Some(call) => call,
-			None => return Ok(ValidTransaction::default()),
-		};
-
-		match call {
-			Call::claim_surcharge(_, _) | Call::update_schedule(_) =>
-				Ok(ValidTransaction::default()),
-			Call::put_code(gas_limit, _)
-				| Call::call(_, _, gas_limit, _)
-				| Call::instantiate(_, gas_limit, _, _)
-			=> {
-				// Check if the specified amount of gas is available in the current block.
-				// This cannot underflow since `gas_spent` is never greater than `T::BlockGasLimit`.
-				let gas_available = T::BlockGasLimit::get() - <Module<T>>::gas_spent();
-				if *gas_limit > gas_available {
-					// gas limit reached, revert the transaction and retry again in the future
-					InvalidTransaction::ExhaustsResources.into()
-				} else {
-					Ok(ValidTransaction::default())
-				}
-			},
-			Call::__PhantomItem(_, _)  => unreachable!("Variant is never constructed"),
-		}
+	/// The same as `subsistence_threshold` but without the need for a preloaded instance.
+	///
+	/// This is for cases where this value is needed in rent calculation rather than
+	/// during contract execution.
+	pub fn subsistence_threshold_uncached() -> BalanceOf<T> {
+		T::Currency::minimum_balance().saturating_add(T::TombstoneDeposit::get())
 	}
 }

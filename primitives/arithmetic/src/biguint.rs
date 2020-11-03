@@ -1,27 +1,29 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Infinite precision unsigned integer for substrate runtime.
 
-use num_traits::Zero;
-use sp_std::{cmp::Ordering, ops, prelude::*, cell::RefCell, convert::TryFrom};
+use num_traits::{Zero, One};
+use sp_std::{cmp::Ordering, ops, prelude::*, vec, cell::RefCell, convert::TryFrom};
 
 // A sensible value for this would be half of the dword size of the host machine. Since the
 // runtime is compiled to 32bit webassembly, using 32 and 64 for single and double respectively
 // should yield the most performance.
+
 /// Representation of a single limb.
 pub type Single = u32;
 /// Representation of two limbs.
@@ -74,7 +76,7 @@ fn div_single(a: Double, b: Single) -> (Double, Single) {
 /// Simple wrapper around an infinitely large integer, represented as limbs of [`Single`].
 #[derive(Clone, Default)]
 pub struct BigUint {
-	/// digits (limbs) of this number (sorted as msb -> lsd).
+	/// digits (limbs) of this number (sorted as msb -> lsb).
 	pub(crate) digits: Vec<Single>,
 }
 
@@ -150,7 +152,7 @@ impl BigUint {
 		// has the ability to cause this. There is nothing to do if the number already has 1
 		// limb only. call it a day and return.
 		if self.len().is_zero() { return; }
-		let index = self.digits.iter().position(|&elem| elem != 0).unwrap_or(0);
+		let index = self.digits.iter().position(|&elem| elem != 0).unwrap_or(self.len() - 1);
 
 		if index > 0 {
 			self.digits = self.digits[index..].to_vec()
@@ -514,6 +516,12 @@ impl Zero for BigUint {
 	}
 }
 
+impl One for BigUint {
+	fn one() -> Self {
+		Self { digits: vec![Single::one()] }
+	}
+}
+
 macro_rules! impl_try_from_number_for {
 	($([$type:ty, $len:expr]),+) => {
 		$(
@@ -549,12 +557,18 @@ macro_rules! impl_from_for_smaller_than_word {
 		})*
 	}
 }
-impl_from_for_smaller_than_word!(u8, u16, Single);
+impl_from_for_smaller_than_word!(u8, u16, u32);
 
-impl From<Double> for BigUint {
+impl From<u64> for BigUint {
 	fn from(a: Double) -> Self {
 		let (ah, al) = split(a);
 		Self { digits: vec![ah, al] }
+	}
+}
+
+impl From<u128> for BigUint {
+	fn from(a: u128) -> Self {
+		crate::helpers_128bit::to_big_uint(a)
 	}
 }
 
@@ -580,19 +594,19 @@ pub mod tests {
 	fn strip_works() {
 		let mut a = BigUint::from_limbs(&[0, 1, 0]);
 		a.lstrip();
-		assert_eq!(a, BigUint { digits: vec![1, 0] });
+		assert_eq!(a.digits, vec![1, 0]);
 
 		let mut a = BigUint::from_limbs(&[0, 0, 1]);
 		a.lstrip();
-		assert_eq!(a, BigUint { digits: vec![1] });
+		assert_eq!(a.digits, vec![1]);
 
 		let mut a = BigUint::from_limbs(&[0, 0]);
 		a.lstrip();
-		assert_eq!(a, BigUint { digits: vec![0] });
+		assert_eq!(a.digits, vec![0]);
 
 		let mut a = BigUint::from_limbs(&[0, 0, 0]);
 		a.lstrip();
-		assert_eq!(a, BigUint { digits: vec![0] });
+		assert_eq!(a.digits, vec![0]);
 	}
 
 	#[test]

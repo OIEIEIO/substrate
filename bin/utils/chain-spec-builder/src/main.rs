@@ -1,28 +1,34 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use std::{fs, path::{Path, PathBuf}};
+use std::{fs, path::{Path, PathBuf}, sync::Arc};
 
 use ansi_term::Style;
 use rand::{Rng, distributions::Alphanumeric, rngs::OsRng};
 use structopt::StructOpt;
 
-use sc_keystore::{Store as Keystore};
+use sc_keystore::LocalKeystore;
 use node_cli::chain_spec::{self, AccountId};
-use sp_core::{sr25519, crypto::{Public, Ss58Codec}, traits::BareCryptoStore};
+use sp_core::{
+	sr25519,
+	crypto::{Public, Ss58Codec},
+};
+use sp_keystore::{SyncCryptoStorePtr, SyncCryptoStore};
 
 /// A utility to easily create a testnet chain spec definition with a given set
 /// of authorities and endowed accounts and/or generate random accounts.
@@ -87,7 +93,7 @@ fn genesis_constructor(
 	let authorities = authority_seeds
 		.iter()
 		.map(AsRef::as_ref)
-		.map(chain_spec::get_authority_keys_from_seed)
+		.map(chain_spec::authority_keys_from_seed)
 		.collect::<Vec<_>>();
 
 	let enable_println = true;
@@ -120,6 +126,7 @@ fn generate_chain_spec(
 	let chain_spec = chain_spec::ChainSpec::from_genesis(
 		"Custom",
 		"custom",
+		sc_chain_spec::ChainType::Live,
 		move || genesis_constructor(&authority_seeds, &endowed_accounts, &sudo_account),
 		vec![],
 		None,
@@ -128,7 +135,7 @@ fn generate_chain_spec(
 		Default::default(),
 	);
 
-	chain_spec.to_json(false).map_err(|err| err.to_string())
+	chain_spec.as_json(false).map_err(|err| err)
 }
 
 fn generate_authority_keys_and_store(
@@ -136,16 +143,17 @@ fn generate_authority_keys_and_store(
 	keystore_path: &Path,
 ) -> Result<(), String> {
 	for (n, seed) in seeds.into_iter().enumerate() {
-		let keystore = Keystore::open(
+		let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::open(
 			keystore_path.join(format!("auth-{}", n)),
 			None,
-		).map_err(|err| err.to_string())?;
+		).map_err(|err| err.to_string())?);
 
 		let (_, _, grandpa, babe, im_online, authority_discovery) =
-			chain_spec::get_authority_keys_from_seed(seed);
+			chain_spec::authority_keys_from_seed(seed);
 
 		let insert_key = |key_type, public| {
-			keystore.write().insert_unknown(
+			SyncCryptoStore::insert_unknown(
+				&*keystore,
 				key_type,
 				&format!("//{}", seed),
 				public,

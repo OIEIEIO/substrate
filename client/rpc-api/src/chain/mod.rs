@@ -1,25 +1,26 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Substrate blockchain API.
 
 pub mod error;
 
 use jsonrpc_core::Result as RpcResult;
-use jsonrpc_core::futures::Future;
 use jsonrpc_derive::rpc;
 use jsonrpc_pubsub::{typed::Subscriber, SubscriptionId};
 use sp_rpc::{number::NumberOrHex, list::ListOrValue};
@@ -47,12 +48,24 @@ pub trait ChainApi<Number, Hash, Header, SignedBlock> {
 	#[rpc(name = "chain_getBlockHash", alias("chain_getHead"))]
 	fn block_hash(
 		&self,
-		hash: Option<ListOrValue<NumberOrHex<Number>>>,
+		hash: Option<ListOrValue<NumberOrHex>>,
 	) -> Result<ListOrValue<Option<Hash>>>;
 
 	/// Get hash of the last finalized block in the canon chain.
 	#[rpc(name = "chain_getFinalizedHead", alias("chain_getFinalisedHead"))]
 	fn finalized_head(&self) -> Result<Hash>;
+
+	/// All head subscription
+	#[pubsub(subscription = "chain_allHead", subscribe, name = "chain_subscribeAllHeads")]
+	fn subscribe_all_heads(&self, metadata: Self::Metadata, subscriber: Subscriber<Header>);
+
+	/// Unsubscribe from all head subscription.
+	#[pubsub(subscription = "chain_allHead", unsubscribe, name = "chain_unsubscribeAllHeads")]
+	fn unsubscribe_all_heads(
+		&self,
+		metadata: Option<Self::Metadata>,
+		id: SubscriptionId,
+	) -> RpcResult<bool>;
 
 	/// New head subscription
 	#[pubsub(
@@ -76,7 +89,7 @@ pub trait ChainApi<Number, Hash, Header, SignedBlock> {
 		id: SubscriptionId,
 	) -> RpcResult<bool>;
 
-	/// New head subscription
+	/// Finalized head subscription
 	#[pubsub(
 		subscription = "chain_finalizedHead",
 		subscribe,
@@ -85,7 +98,7 @@ pub trait ChainApi<Number, Hash, Header, SignedBlock> {
 	)]
 	fn subscribe_finalized_heads(&self, metadata: Self::Metadata, subscriber: Subscriber<Header>);
 
-	/// Unsubscribe from new head subscription.
+	/// Unsubscribe from finalized head subscription.
 	#[pubsub(
 		subscription = "chain_finalizedHead",
 		unsubscribe,

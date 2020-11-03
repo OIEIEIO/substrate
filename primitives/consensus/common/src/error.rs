@@ -1,86 +1,96 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Error types in Consensus
 use sp_version::RuntimeVersion;
-use sp_core::ed25519::{Public, Signature};
+use sp_core::ed25519::Public;
 use std::error;
 
 /// Result type alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Error type.
-#[derive(Debug, derive_more::Display, derive_more::From)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
 	/// Missing state at block with given descriptor.
-	#[display(fmt="State unavailable at block {}", _0)]
+	#[error("State unavailable at block {0}")]
 	StateUnavailable(String),
 	/// I/O terminated unexpectedly
-	#[display(fmt="I/O terminated unexpectedly.")]
+	#[error("I/O terminated unexpectedly.")]
 	IoTerminated,
-	/// Unable to schedule wakeup.
-	#[display(fmt="Timer error: {}", _0)]
-	FaultyTimer(std::io::Error),
+	/// Intermediate missing.
+	#[error("Missing intermediate.")]
+	NoIntermediate,
+	/// Intermediate is of wrong type.
+	#[error("Invalid intermediate.")]
+	InvalidIntermediate,
+	/// Unable to schedule wake-up.
+	#[error("Timer error: {0}")]
+	FaultyTimer(#[from] std::io::Error),
 	/// Error while working with inherent data.
-	#[display(fmt="InherentData error: {}", _0)]
-	InherentData(sp_inherents::Error),
+	#[error("InherentData error: {0}")]
+	InherentData(#[from] sp_inherents::Error),
 	/// Unable to propose a block.
-	#[display(fmt="Unable to create block proposal.")]
+	#[error("Unable to create block proposal.")]
 	CannotPropose,
 	/// Error checking signature
-	#[display(fmt="Message signature {:?} by {:?} is invalid.", _0, _1)]
-	InvalidSignature(Signature, Public),
+	#[error("Message signature {0:?} by {1:?} is invalid.")]
+	InvalidSignature(Vec<u8>, Vec<u8>),
 	/// Invalid authorities set received from the runtime.
-	#[display(fmt="Current state of blockchain has invalid authorities set")]
+	#[error("Current state of blockchain has invalid authorities set")]
 	InvalidAuthoritiesSet,
 	/// Account is not an authority.
-	#[display(fmt="Message sender {:?} is not a valid authority.", _0)]
+	#[error("Message sender {0:?} is not a valid authority")]
 	InvalidAuthority(Public),
 	/// Authoring interface does not match the runtime.
-	#[display(fmt="Authoring for current \
-				runtime is not supported. Native ({}) cannot author for on-chain ({}).", native, on_chain)]
+	#[error("Authoring for current \
+				runtime is not supported. Native ({native}) cannot author for on-chain ({on_chain}).")]
 	IncompatibleAuthoringRuntime { native: RuntimeVersion, on_chain: RuntimeVersion },
 	/// Authoring interface does not match the runtime.
-	#[display(fmt="Authoring for current runtime is not supported since it has no version.")]
+	#[error("Authoring for current runtime is not supported since it has no version.")]
 	RuntimeVersionMissing,
 	/// Authoring interface does not match the runtime.
-	#[display(fmt="Authoring in current build is not supported since it has no runtime.")]
+	#[error("Authoring in current build is not supported since it has no runtime.")]
 	NativeRuntimeMissing,
 	/// Justification requirements not met.
-	#[display(fmt="Invalid justification.")]
+	#[error("Invalid justification.")]
 	InvalidJustification,
 	/// Some other error.
-	#[display(fmt="Other error: {}", _0)]
-	Other(Box<dyn error::Error + Send>),
+	#[error(transparent)]
+	Other(#[from] Box<dyn error::Error + Sync + Send + 'static>),
 	/// Error from the client while importing
-	#[display(fmt="Import failed: {}", _0)]
-	#[from(ignore)]
+	#[error("Import failed: {0}")]
 	ClientImport(String),
 	/// Error from the client while importing
-	#[display(fmt="Chain lookup failed: {}", _0)]
-	#[from(ignore)]
+	#[error("Chain lookup failed: {0}")]
 	ChainLookup(String),
+	/// Signing failed
+	#[error("Failed to sign using key: {0:?}. Reason: {1}")]
+	CannotSign(Vec<u8>, String)
 }
 
-impl error::Error for Error {
-	fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-		match self {
-			Error::FaultyTimer(ref err) => Some(err),
-			Error::Other(ref err) => Some(&**err),
-			_ => None,
-		}
+impl core::convert::From<Public> for Error {
+	fn from(p: Public) -> Self {
+		Self::InvalidAuthority(p)
+	}
+}
+
+impl core::convert::From<String> for Error {
+	fn from(s: String) -> Self {
+		Self::StateUnavailable(s)
 	}
 }

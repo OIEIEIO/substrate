@@ -1,18 +1,19 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Tests for the module.
 
@@ -31,11 +32,11 @@ use frame_support::{
 fn basic_setup_works() {
 	new_test_ext().execute_with(|| {
 		// Nothing in storage to start
-		assert_eq!(Recovery::recovered_account(&1), None);
+		assert_eq!(Recovery::proxy(&2), None);
 		assert_eq!(Recovery::active_recovery(&1, &2), None);
 		assert_eq!(Recovery::recovery_config(&1), None);
 		// Everyone should have starting balance of 100
-		assert_eq!(Balances::free_balance(&1), 100);
+		assert_eq!(Balances::free_balance(1), 100);
 	});
 }
 
@@ -45,7 +46,7 @@ fn set_recovered_works() {
 		// Not accessible by a normal user
 		assert_noop!(Recovery::set_recovered(Origin::signed(1), 5, 1), BadOrigin);
 		// Root can set a recovered account though
-		assert_ok!(Recovery::set_recovered(Origin::ROOT, 5, 1));
+		assert_ok!(Recovery::set_recovered(Origin::root(), 5, 1));
 		// Account 1 should now be able to make a call through account 5
 		let call = Box::new(Call::Balances(BalancesCall::transfer(1, 100)));
 		assert_ok!(Recovery::as_recovered(Origin::signed(1), 5, call));
@@ -56,7 +57,7 @@ fn set_recovered_works() {
 }
 
 #[test]
-fn recovery_lifecycle_works() {
+fn recovery_life_cycle_works() {
 	new_test_ext().execute_with(|| {
 		let friends = vec![2, 3, 4];
 		let threshold = 3;
@@ -91,10 +92,13 @@ fn recovery_lifecycle_works() {
 		// All funds have been fully recovered!
 		assert_eq!(Balances::free_balance(1), 200);
 		assert_eq!(Balances::free_balance(5), 0);
+		// Remove the proxy link.
+		assert_ok!(Recovery::cancel_recovered(Origin::signed(1), 5));
+
 		// All storage items are removed from the module
-		assert!(!<ActiveRecoveries<Test>>::exists(&5, &1));
-		assert!(!<Recoverable<Test>>::exists(&5));
-		assert!(!<Recovered<Test>>::exists(&5));
+		assert!(!<ActiveRecoveries<Test>>::contains_key(&5, &1));
+		assert!(!<Recoverable<Test>>::contains_key(&5));
+		assert!(!<Proxy<Test>>::contains_key(&1));
 	});
 }
 
@@ -219,7 +223,7 @@ fn initiate_recovery_handles_basic_errors() {
 		assert_ok!(Recovery::initiate_recovery(Origin::signed(1), 5));
 		assert_noop!(Recovery::initiate_recovery(Origin::signed(1), 5), Error::<Test>::AlreadyStarted);
 		// No double deposit
-		assert_eq!(Balances::reserved_balance(&1), 10);
+		assert_eq!(Balances::reserved_balance(1), 10);
 	});
 }
 
@@ -234,10 +238,10 @@ fn initiate_recovery_works() {
 		// Recovery can be initiated
 		assert_ok!(Recovery::initiate_recovery(Origin::signed(1), 5));
 		// Deposit is reserved
-		assert_eq!(Balances::reserved_balance(&1), 10);
+		assert_eq!(Balances::reserved_balance(1), 10);
 		// Recovery status object is created correctly
 		let recovery_status = ActiveRecovery {
-			created: 1,
+			created: 0,
 			deposit: 10,
 			friends: vec![],
 		};
@@ -285,7 +289,7 @@ fn vouch_recovery_works() {
 		assert_ok!(Recovery::vouch_recovery(Origin::signed(3), 5, 1));
 		// Final recovery status object is updated correctly
 		let recovery_status = ActiveRecovery {
-			created: 1,
+			created: 0,
 			deposit: 10,
 			friends: vec![2, 3, 4],
 		};
@@ -335,7 +339,7 @@ fn claim_recovery_works() {
 		// Account can be recovered.
 		assert_ok!(Recovery::claim_recovery(Origin::signed(1), 5));
 		// Recovered storage item is correctly created
-		assert_eq!(<Recovered<Test>>::get(&5), Some(1));
+		assert_eq!(<Proxy<Test>>::get(&1), Some(5));
 		// Account could be re-recovered in the case that the recoverer account also gets lost.
 		assert_ok!(Recovery::initiate_recovery(Origin::signed(4), 5));
 		assert_ok!(Recovery::vouch_recovery(Origin::signed(2), 5, 4));
@@ -347,7 +351,7 @@ fn claim_recovery_works() {
 		// Account is re-recovered.
 		assert_ok!(Recovery::claim_recovery(Origin::signed(4), 5));
 		// Recovered storage item is correctly updated
-		assert_eq!(<Recovered<Test>>::get(&5), Some(4));
+		assert_eq!(<Proxy<Test>>::get(&4), Some(5));
 	});
 }
 

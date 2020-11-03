@@ -1,24 +1,25 @@
-// Copyright 2018-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: Apache-2.0
 
-// Substrate is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-
-// You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use codec::{Decode, Encode};
 use sp_core::sandbox as sandbox_primitives;
 use sp_io::sandbox;
 use sp_std::{prelude::*, slice, marker, mem, vec, rc::Rc};
-use super::{Error, TypedValue, ReturnValue, HostFuncType};
+use super::{Error, Value, ReturnValue, HostFuncType};
 
 mod ffi {
 	use sp_std::mem;
@@ -183,7 +184,7 @@ extern "C" fn dispatch_thunk<T>(
 			slice::from_raw_parts(serialized_args_ptr, serialized_args_len)
 		}
 	};
-	let args = Vec::<TypedValue>::decode(&mut &serialized_args[..]).expect(
+	let args = Vec::<Value>::decode(&mut &serialized_args[..]).expect(
 		"serialized args should be provided by the runtime;
 			correctly serialized data should be deserializable;
 			qed",
@@ -244,11 +245,11 @@ impl<T> Instance<T> {
 	pub fn invoke(
 		&mut self,
 		name: &str,
-		args: &[TypedValue],
+		args: &[Value],
 		state: &mut T,
 	) -> Result<ReturnValue, Error> {
 		let serialized_args = args.to_vec().encode();
-		let mut return_val = vec![0u8; sandbox_primitives::ReturnValue::ENCODED_MAX_SIZE];
+		let mut return_val = vec![0u8; ReturnValue::ENCODED_MAX_SIZE];
 
 		let result = sandbox::invoke(
 			self.instance_idx,
@@ -261,13 +262,17 @@ impl<T> Instance<T> {
 
 		match result {
 			sandbox_primitives::ERR_OK => {
-				let return_val = sandbox_primitives::ReturnValue::decode(&mut &return_val[..])
+				let return_val = ReturnValue::decode(&mut &return_val[..])
 					.map_err(|_| Error::Execution)?;
 				Ok(return_val)
 			}
 			sandbox_primitives::ERR_EXECUTION => Err(Error::Execution),
 			_ => unreachable!(),
 		}
+	}
+
+	pub fn get_global_val(&self, name: &str) -> Option<Value> {
+		sandbox::get_global_val(self.instance_idx, name)
 	}
 }
 

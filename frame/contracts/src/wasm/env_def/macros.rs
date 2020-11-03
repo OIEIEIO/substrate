@@ -123,10 +123,10 @@ macro_rules! unmarshall_then_body_then_marshall {
 
 #[macro_export]
 macro_rules! define_func {
-	( < E: $ext_ty:tt > $name:ident ( $ctx: ident $(, $names:ident : $params:ty)*) $(-> $returns:ty)* => $body:tt ) => {
-		fn $name< E: $ext_ty >(
+	( < E: $seal_ty:tt > $name:ident ( $ctx: ident $(, $names:ident : $params:ty)*) $(-> $returns:ty)* => $body:tt ) => {
+		fn $name< E: $seal_ty >(
 			$ctx: &mut $crate::wasm::Runtime<E>,
-			args: &[sp_sandbox::TypedValue],
+			args: &[sp_sandbox::Value],
 		) -> Result<sp_sandbox::ReturnValue, sp_sandbox::HostError> {
 			#[allow(unused)]
 			let mut args = args.iter();
@@ -142,9 +142,9 @@ macro_rules! define_func {
 
 #[macro_export]
 macro_rules! register_func {
-	( $reg_cb:ident, < E: $ext_ty:tt > ; ) => {};
+	( $reg_cb:ident, < E: $seal_ty:tt > ; ) => {};
 
-	( $reg_cb:ident, < E: $ext_ty:tt > ;
+	( $reg_cb:ident, < E: $seal_ty:tt > ;
 		$name:ident ( $ctx:ident $( , $names:ident : $params:ty )* )
 		$( -> $returns:ty )* => $body:tt $($rest:tt)*
 	) => {
@@ -152,12 +152,12 @@ macro_rules! register_func {
 			stringify!($name).as_bytes(),
 			{
 				define_func!(
-					< E: $ext_ty > $name ( $ctx $(, $names : $params )* ) $( -> $returns )* => $body
+					< E: $seal_ty > $name ( $ctx $(, $names : $params )* ) $( -> $returns )* => $body
 				);
 				$name::<E>
 			}
 		);
-		register_func!( $reg_cb, < E: $ext_ty > ; $($rest)* );
+		register_func!( $reg_cb, < E: $seal_ty > ; $($rest)* );
 	};
 }
 
@@ -169,7 +169,7 @@ macro_rules! register_func {
 /// It's up to the user of this macro to check signatures of wasm code to be executed
 /// and reject the code if any imported function has a mismatched signature.
 macro_rules! define_env {
-	( $init_name:ident , < E: $ext_ty:tt > ,
+	( $init_name:ident , < E: $seal_ty:tt > ,
 		$( $name:ident ( $ctx:ident $( , $names:ident : $params:ty )* )
 			$( -> $returns:ty )* => $body:tt , )*
 	) => {
@@ -185,7 +185,7 @@ macro_rules! define_env {
 
 		impl<E: Ext> $crate::wasm::env_def::FunctionImplProvider<E> for $init_name {
 			fn impls<F: FnMut(&[u8], $crate::wasm::env_def::HostFunc<E>)>(f: &mut F) {
-				register_func!(f, < E: $ext_ty > ; $( $name ( $ctx $( , $names : $params )* ) $( -> $returns)* => $body )* );
+				register_func!(f, < E: $seal_ty > ; $( $name ( $ctx $( , $names : $params )* ) $( -> $returns)* => $body )* );
 			}
 		}
 	};
@@ -196,7 +196,7 @@ mod tests {
 	use parity_wasm::elements::FunctionType;
 	use parity_wasm::elements::ValueType;
 	use sp_runtime::traits::Zero;
-	use sp_sandbox::{self, ReturnValue, TypedValue};
+	use sp_sandbox::{ReturnValue, Value};
 	use crate::wasm::tests::MockExt;
 	use crate::wasm::Runtime;
 	use crate::exec::Ext;
@@ -206,7 +206,7 @@ mod tests {
 	fn macro_unmarshall_then_body_then_marshall_value_or_trap() {
 		fn test_value(
 			_ctx: &mut u32,
-			args: &[sp_sandbox::TypedValue],
+			args: &[sp_sandbox::Value],
 		) -> Result<ReturnValue, sp_sandbox::HostError> {
 			let mut args = args.iter();
 			unmarshall_then_body_then_marshall!(
@@ -224,17 +224,17 @@ mod tests {
 
 		let ctx = &mut 0;
 		assert_eq!(
-			test_value(ctx, &[TypedValue::I32(15), TypedValue::I32(3)]).unwrap(),
-			ReturnValue::Value(TypedValue::I32(5)),
+			test_value(ctx, &[Value::I32(15), Value::I32(3)]).unwrap(),
+			ReturnValue::Value(Value::I32(5)),
 		);
-		assert!(test_value(ctx, &[TypedValue::I32(15), TypedValue::I32(0)]).is_err());
+		assert!(test_value(ctx, &[Value::I32(15), Value::I32(0)]).is_err());
 	}
 
 	#[test]
 	fn macro_unmarshall_then_body_then_marshall_unit() {
 		fn test_unit(
 			ctx: &mut u32,
-			args: &[sp_sandbox::TypedValue],
+			args: &[sp_sandbox::Value],
 		) -> Result<ReturnValue, sp_sandbox::HostError> {
 			let mut args = args.iter();
 			unmarshall_then_body_then_marshall!(
@@ -248,14 +248,14 @@ mod tests {
 		}
 
 		let ctx = &mut 0;
-		let result = test_unit(ctx, &[TypedValue::I32(2), TypedValue::I32(3)]).unwrap();
+		let result = test_unit(ctx, &[Value::I32(2), Value::I32(3)]).unwrap();
 		assert_eq!(result, ReturnValue::Unit);
 		assert_eq!(*ctx, 5);
 	}
 
 	#[test]
 	fn macro_define_func() {
-		define_func!( <E: Ext> ext_gas (_ctx, amount: u32) => {
+		define_func!( <E: Ext> seal_gas (_ctx, amount: u32) => {
 			let amount = Gas::from(amount);
 			if !amount.is_zero() {
 				Ok(())
@@ -263,8 +263,8 @@ mod tests {
 				Err(sp_sandbox::HostError)
 			}
 		});
-		let _f: fn(&mut Runtime<MockExt>, &[sp_sandbox::TypedValue])
-			-> Result<sp_sandbox::ReturnValue, sp_sandbox::HostError> = ext_gas::<MockExt>;
+		let _f: fn(&mut Runtime<MockExt>, &[sp_sandbox::Value])
+			-> Result<sp_sandbox::ReturnValue, sp_sandbox::HostError> = seal_gas::<MockExt>;
 	}
 
 	#[test]
@@ -282,7 +282,7 @@ mod tests {
 
 	#[test]
 	fn macro_unmarshall_then_body() {
-		let args = vec![TypedValue::I32(5), TypedValue::I32(3)];
+		let args = vec![Value::I32(5), Value::I32(3)];
 		let mut args = args.iter();
 
 		let ctx: &mut u32 = &mut 0;
@@ -307,7 +307,7 @@ mod tests {
 		use crate::wasm::env_def::ImportSatisfyCheck;
 
 		define_env!(Env, <E: Ext>,
-			ext_gas( _ctx, amount: u32 ) => {
+			seal_gas( _ctx, amount: u32 ) => {
 				let amount = Gas::from(amount);
 				if !amount.is_zero() {
 					Ok(())
@@ -317,7 +317,7 @@ mod tests {
 			},
 		);
 
-		assert!(Env::can_satisfy(b"ext_gas", &FunctionType::new(vec![ValueType::I32], None)));
+		assert!(Env::can_satisfy(b"seal_gas", &FunctionType::new(vec![ValueType::I32], None)));
 		assert!(!Env::can_satisfy(b"not_exists", &FunctionType::new(vec![], None)));
 	}
 }

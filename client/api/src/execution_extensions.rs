@@ -25,8 +25,8 @@ use codec::Decode;
 use sp_core::{
 	ExecutionContext,
 	offchain::{self, OffchainExt, TransactionPoolExt},
-	traits::{BareCryptoStorePtr, KeystoreExt},
 };
+use sp_keystore::{KeystoreExt, SyncCryptoStorePtr};
 use sp_runtime::{
 	generic::BlockId,
 	traits,
@@ -64,7 +64,7 @@ impl Default for ExecutionStrategies {
 
 /// Generate the starting set of ExternalitiesExtensions based upon the given capabilities
 pub trait ExtensionsFactory: Send + Sync {
-	/// Make `Extensions` for given Capapbilities
+	/// Make `Extensions` for given `Capabilities`.
 	fn extensions_for(&self, capabilities: offchain::Capabilities) -> Extensions;
 }
 
@@ -77,13 +77,17 @@ impl ExtensionsFactory for () {
 /// A producer of execution extensions for offchain calls.
 ///
 /// This crate aggregates extensions available for the offchain calls
-/// and is responsbile to produce a right `Extensions` object
+/// and is responsible for producing a correct `Extensions` object.
 /// for each call, based on required `Capabilities`.
 pub struct ExecutionExtensions<Block: traits::Block> {
 	strategies: ExecutionStrategies,
-	keystore: Option<BareCryptoStorePtr>,
+	keystore: Option<SyncCryptoStorePtr>,
 	// FIXME: these two are only RwLock because of https://github.com/paritytech/substrate/issues/4587
 	//        remove when fixed.
+	// To break retain cycle between `Client` and `TransactionPool` we require this
+	// extension to be a `Weak` reference.
+	// That's also the reason why it's being registered lazily instead of
+	// during initialization.
 	transaction_pool: RwLock<Option<Weak<dyn sp_transaction_pool::OffchainSubmitTransaction<Block>>>>,
 	extensions_factory: RwLock<Box<dyn ExtensionsFactory>>,
 }
@@ -103,11 +107,16 @@ impl<Block: traits::Block> ExecutionExtensions<Block> {
 	/// Create new `ExecutionExtensions` given a `keystore` and `ExecutionStrategies`.
 	pub fn new(
 		strategies: ExecutionStrategies,
-		keystore: Option<BareCryptoStorePtr>,
+		keystore: Option<SyncCryptoStorePtr>,
 	) -> Self {
 		let transaction_pool = RwLock::new(None);
 		let extensions_factory = Box::new(());
-		Self { strategies, keystore, extensions_factory: RwLock::new(extensions_factory), transaction_pool }
+		Self {
+			strategies,
+			keystore,
+			extensions_factory: RwLock::new(extensions_factory),
+			transaction_pool,
+		}
 	}
 
 	/// Get a reference to the execution strategies.
@@ -121,13 +130,10 @@ impl<Block: traits::Block> ExecutionExtensions<Block> {
 	}
 
 	/// Register transaction pool extension.
-	///
-	/// To break retain cycle between `Client` and `TransactionPool` we require this
-	/// extension to be a `Weak` reference.
-	/// That's also the reason why it's being registered lazily instead of
-	/// during initialisation.
-	pub fn register_transaction_pool(&self, pool: Weak<dyn sp_transaction_pool::OffchainSubmitTransaction<Block>>) {
-		*self.transaction_pool.write() = Some(pool);
+	pub fn register_transaction_pool<T>(&self, pool: &Arc<T>)
+		where T: sp_transaction_pool::OffchainSubmitTransaction<Block> + 'static
+	{
+		*self.transaction_pool.write() = Some(Arc::downgrade(&pool) as _);
 	}
 
 	/// Create `ExecutionManager` and `Extensions` for given offchain call.
@@ -160,24 +166,28 @@ impl<Block: traits::Block> ExecutionExtensions<Block> {
 		let mut extensions = self.extensions_factory.read().extensions_for(capabilities);
 
 		if capabilities.has(offchain::Capability::Keystore) {
-			if let Some(keystore) = self.keystore.as_ref() {
+			if let Some(ref keystore) = self.keystore {
 				extensions.register(KeystoreExt(keystore.clone()));
 			}
 		}
 
 		if capabilities.has(offchain::Capability::TransactionPool) {
 			if let Some(pool) = self.transaction_pool.read().as_ref().and_then(|x| x.upgrade()) {
-				extensions.register(TransactionPoolExt(Box::new(TransactionPoolAdapter {
-					at: *at,
-					pool,
-				}) as _));
+				extensions.register(
+					TransactionPoolExt(
+						Box::new(TransactionPoolAdapter {
+							at: *at,
+							pool,
+						}) as _
+					),
+				);
 			}
 		}
 
 		if let ExecutionContext::OffchainCall(Some(ext)) = context {
 			extensions.register(
-				OffchainExt::new(offchain::LimitedExternalities::new(capabilities, ext.0))
-			)
+				OffchainExt::new(offchain::LimitedExternalities::new(capabilities, ext.0)),
+			);
 		}
 
 		(manager, extensions)

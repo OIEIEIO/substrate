@@ -1,18 +1,20 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Rust executor possible errors.
 
@@ -27,7 +29,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
 	/// Unserializable Data
 	InvalidData(sp_serializer::Error),
-	/// Trap occured during execution
+	/// Trap occurred during execution
 	Trap(wasmi::Trap),
 	/// Wasmi loading/instantiating error
 	Wasmi(wasmi::Error),
@@ -79,6 +81,25 @@ pub enum Error {
 	/// Execution of a host function failed.
 	#[display(fmt="Host function {} execution failed with: {}", _0, _1)]
 	FunctionExecution(String, String),
+	/// No table is present.
+	///
+	/// Call was requested that requires table but none was present in the instance.
+	#[display(fmt="No table exported by wasm blob")]
+	NoTable,
+	/// No table entry is present.
+	///
+	/// Call was requested that requires specific entry in the table to be present.
+	#[display(fmt="No table entry with index {} in wasm blob exported table", _0)]
+	#[from(ignore)]
+	NoTableEntryWithIndex(u32),
+	/// Table entry is not a function.
+	#[display(fmt="Table element with index {} is not a function in wasm blob exported table", _0)]
+	#[from(ignore)]
+	TableElementIsNotAFunction(u32),
+	/// Function in table is null and thus cannot be called.
+	#[display(fmt="Table entry with index {} in wasm blob is null", _0)]
+	#[from(ignore)]
+	FunctionRefIsNull(u32),
 }
 
 impl std::error::Error for Error {
